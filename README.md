@@ -9,9 +9,17 @@ A high-performance implementation of Singular Value Decomposition (SVD) for PyTo
 - **Randomized SVD (rSVD)**: Efficiently handles large matrices (e.g., $10,000 \times 10,000$) by running entirely on the GPU.
 - **Pure Metal Backend**: No CPU fallbacks for orthogonalization loop, unlike standard PyTorch MPS which falls back to CPU for `linalg.svd` and `linalg.qr`.
 - **Performance**:
-  - **Threadgroup Optimized**: Uses shared memory and SIMD shuffling for ~20x speedup on tall matrices.
-  - **Fused Block-Jacobi Kernel**: **3.5x speedup** on small/medium blocks ($1024 \times 1024$) and **40x speedup** on large tall matrices ($4096 \times 2048$) compared to CPU fallback.
-  - **Benchmark**: Decomposes a $10,000 \times 10,000$ matrix (Rank 100) in **~1.18 seconds**.
+  - **Fused Block-Jacobi Kernel**: **3.5x - 40x speedup** compared to CPU fallback.
+  - **Threadgroup Reduction**: ~20x speedup on tall matrices.
+  
+  | Scenario | Matrix Size | Speedup | Notes |
+  | :--- | :--- | :--- | :--- |
+  | **Batched SVD** | 64 x 128 x 128 | **4.23x** | Fused Kernel + Threadgroup reduction |
+  | **Square SVD** | 1024 x 1024 | **3.53x** | Fused Block-Jacobi Kernel |
+  | **Square SVD** | 2048 x 2048 | **16.28x** | Massive parallelism win |
+  | **Tall SVD** | 4096 x 2048 | **40.52x** | GPU compute density dominates |
+  | **Large rSVD** | 4096 x 4096 | **8.60x** | Randomized alg + Metal kernels |
+  | **Huge rSVD** | 8192 x 8192 | **>10x** | FP16 compute limits |
 
 ## Installation
 
