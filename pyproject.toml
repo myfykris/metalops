@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metalsvd"
+version = "0.0.1"
+description = "Batched One-Sided Jacobi SVD on Metal"
+readme = "README.md"
+requires-python = ">=3.9"
+
+authors = [
+  { name = "Kris Bailey via Antigravity", email = "antigravity@gemini.com" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/myfykris/metalsvd"
+"Bug Tracker" = "https://github.com/myfykris/metalsvd/issues"

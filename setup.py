@@ -12,7 +12,7 @@ setup(
     ext_modules=[
         CppExtension(
             name='metalsvd_backend',
-            sources=['src/svd_mps.mm'],
+            sources=['native/svd_mps.mm'],
             extra_compile_args={'cxx': ['-std=c++17', '-fno-objc-arc']},
             extra_link_args=['-framework', 'Metal', '-framework', 'Foundation'],
             # PyTorch's CppExtension on Mac usually handles -framework Metal if we include ObjC++.
@@ -22,6 +22,7 @@ setup(
         'build_ext': BuildExtension
     },
     packages=['metalsvd'],
+    package_dir={'': 'src'},
     package_data={
         'metalsvd': ['src/*.metal'],  # We might want to install the metal shader if we load it from file
     },
