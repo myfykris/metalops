@@ -10,6 +10,9 @@ unneeded/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.venv/
+env/
+venv/
 
 # IDE
 .vscode/
