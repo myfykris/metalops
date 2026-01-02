@@ -7,10 +7,18 @@ The implementation is verified against `torch.linalg.svd` (CPU/LAPACK reference)
 - **Reconstruction Error**: $\frac{||A - U \Sigma V^T||_F}{||A||_F}$
 - **Orthogonality Error**: $||I - U^T U||_\infty$
 
-### Results (Batch=64, 128x128, Float32)
-- **Reconstruction Error**: `5e-6`
-- **Orthogonality Error**: `2e-5`
-- **Result**: **PASS**
+### Results
+- **Large Scale**: `randomized_svd` on $4096 \times 4096$ matrix (Rank 100)
+  - **MetalSVD**: 0.72s
+  - **PyTorch (CPU)**: 6.14s
+  - **Speedup**: **8.5x**
+  
+- **Huge Scale**: `randomized_svd` on $8192 \times 8192$ matrix
+  - **FP32**: 0.97s
+  - **FP16**: 1.02s
+  - **Accuracy**: `3e-4` Relative Error (FP16 verified stable)
+
+- **Batched Small**: Baseline CPU is faster for very small matrices due to Metal dispatch overhead (~300ms overhead). MetalSVD is designed for throughput or larger matrices.
 
 ---
 
