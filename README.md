@@ -1,9 +1,10 @@
 # MPS SVD: Accelerated SVD for PyTorch on Apple Silicon
 
-A high-performance implementation of Singular Value Decomposition (SVD) for Batched Small Matrices and Tall-Skinny Matrices on macOS Metal (Apple Silicon M1/M2/M3).
+A high-performance implementation of Singular Value Decomposition (SVD) for PyTorch on macOS Metal (Apple Silicon M1/M2/M3). Supports **any matrix shape** (Wide, Tall, Square) and **any size** (from small batched tensors to large-scale dense matrices).
 
 ## Features
 
+- **Universal Shape Support**: Handles Tall ($M \ge N$), Wide ($M < N$), and Square matrices automatically.
 - **Batched One-Sided Jacobi SVD**: Optimized for batches of small matrices (e.g., $64 \times 128$).
 - **Randomized SVD (rSVD)**: Efficiently handles large matrices (e.g., $10,000 \times 10,000$) by running entirely on the GPU.
 - **Pure Metal Backend**: No CPU fallbacks for orthogonalization loop, unlike standard PyTorch MPS which falls back to CPU for `linalg.svd` and `linalg.qr`.
