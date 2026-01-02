@@ -26,9 +26,9 @@ A high-performance implementation of Singular Value Decomposition (SVD) for PyTo
 
 ### Build from Source
 ```bash
-git clone https://github.com/yourusername/mpssvd.git
+git clone https://github.com/myfykris/mpssvd.git
 cd mpssvd
-python setup.py install
+pip install .
 ```
 
 ## Usage
@@ -50,7 +50,18 @@ U, S, V = mpssvd.svd(A)
 print(U.shape) # (64, 128, 128)
 ```
 
-### 2. Randomized SVD (Large Matrices)
+### 2. Seamless Integration (Monkeypatching)
+Drop-in replacement for existing codebases. Automatically routes MPS tensors to `mpssvd` while keeping CPU/CUDA behavior unchanged.
+
+```python
+import mpssvd
+mpssvd.patch_torch()
+
+# Now torch.linalg.svd uses our Metal backend for MPS tensors!
+U, S, Vh = torch.linalg.svd(A, full_matrices=False)
+```
+
+### 3. Randomized SVD (Large Matrices)
 Best for large matrices where you only need the top-$k$ singular values/vectors.
 
 ```python
@@ -69,7 +80,7 @@ A_approx = U @ torch.diag(S) @ V.T
 print(f"Approximation Error: {(A - A_approx).norm() / A.norm():.2e}")
 ```
 
-### 3. Lanczos SVD ("Harder but Better")
+### 4. Lanczos SVD ("Harder but Better")
 Best for precision on large matrices with slowly decaying spectra where Randomized SVD might struggle.
 
 ```python
@@ -99,10 +110,9 @@ For high-precision needs, we provide **Golub-Kahan-Lanczos**:
 3. Solves the SVD of the resulting bidiagonal matrix.
 
 
-## TODO / Roadmap
-- [ ] **Autograd Support**: Implement `backward()` pass for training efficiently in Python.
-- [ ] **Half Precision**: Support `float16` and `bfloat16`.
-- [ ] **Odd Dimensions**: Robust padding for non-even dimensions.
+## Roadmap
+- [ ] **Complex Number Support**: Implementation of $2 \times 2$ unitary rotations for complex SVD.
+- [ ] **Binary Wheels**: CI/CD pipeline for pre-built PyPI packages.
 
 ## License
 MIT
