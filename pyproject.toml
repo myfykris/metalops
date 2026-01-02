@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metalsvd"
-version = "0.0.1"
+version = "0.0.2"
 description = "Batched One-Sided Jacobi SVD on Metal"
 readme = "README.md"
 requires-python = ">=3.9"

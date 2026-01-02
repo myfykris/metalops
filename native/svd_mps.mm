@@ -15,6 +15,7 @@ using namespace at::native::mps;
 // -----------------------------------------------------------------------------
 const char* SVD_METAL_SOURCE = R"METAL(
 #include <metal_stdlib>
+// REBUILD_CHECK_001
 using namespace metal;
 
 constant float EPSILON = 1e-6;
@@ -38,6 +39,18 @@ inline half simd_reduction(half val) {
     val += simd_shuffle_down(val, 1);
     return val;
 }
+
+#if __METAL_VERSION__ >= 310
+// Helper: SIMD Reduction for bfloat
+inline bfloat simd_reduction(bfloat val) {
+    val += simd_shuffle_down(val, 16);
+    val += simd_shuffle_down(val, 8);
+    val += simd_shuffle_down(val, 4);
+    val += simd_shuffle_down(val, 2);
+    val += simd_shuffle_down(val, 1);
+    return val;
+}
+#endif
 
 // -----------------------------------------------------------------------------
 // Macros for Templating
@@ -200,7 +213,7 @@ kernel void svd_fused_block_kernel_##SUFFIX( \
                 /* 2. Compute Rotation */ \
                 float c = 1.0f, s = 0.0f; \
                 bool rotate = false; \
-                if (abs(apq) > MAX(1e-6f, 1e-6f * sqrt(app * aqq))) { \
+                if (abs(apq) > max(1e-6f, 1e-6f * sqrt(app * aqq))) { \
                     rotate = true; \
                     float tau = (aqq - app) / (2.0f * apq); \
                     float t; \

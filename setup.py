@@ -4,7 +4,7 @@ import os
 
 setup(
     name='metalsvd',
-    version='0.0.1',
+    version='0.0.2',
     author='Kris Bailey via Antigravity',
     author_email='antigravity@gemini.com',
     description='Batched One-Sided Jacobi SVD on Metal',
