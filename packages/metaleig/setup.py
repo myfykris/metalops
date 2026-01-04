@@ -13,7 +13,7 @@ def get_metal_files():
 
 setup(
     name='metaleig',
-    version='0.0.3',
+    version='0.0.4',
     author='Antigravity',
     description='Metal Eigendecomposition for PyTorch MPS',
     packages=find_packages(where='src'),
