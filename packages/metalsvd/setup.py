@@ -4,16 +4,16 @@ import os
 
 setup(
     name='metalsvd',
-    version='0.0.3',
+    version='0.0.6',
     author='Kris Bailey via Antigravity',
-    author_email='antigravity@gemini.com',
+    author_email='kris@krisbailey.com',
     description='Batched One-Sided Jacobi SVD on Metal',
     long_description='A PyTorch extension implementing One-Sided Jacobi SVD on macOS Metal.',
     ext_modules=[
         CppExtension(
             name='metalsvd_backend',
             sources=['native/svd_mps.mm'],
-            extra_compile_args={'cxx': ['-std=c++17', '-fno-objc-arc']},
+            extra_compile_args={'cxx': ['-std=c++17', '-fno-objc-arc', '-O3', '-ffast-math']},
             extra_link_args=['-framework', 'Metal', '-framework', 'Foundation'],
             # PyTorch's CppExtension on Mac usually handles -framework Metal if we include ObjC++.
         ),

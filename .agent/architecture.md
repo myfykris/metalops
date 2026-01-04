@@ -23,8 +23,16 @@
 - **Wide Matrices ($M < N$)**: Automatically handles wide inputs by transposing, calling SVD, and swapping $U/V$.
 
 ## Design Decisions
-- **Embedded Metal**: We store the Metal source as a string in the C++ binary. This simplifies distribution (no separate `.metallib` file management) at the cost of a small compilation hit on first run.
+- **External Metal Source**: We load `svd_kernels.metal` from the file system at runtime. This allows for rapid iteration and hot-reloading during development without recompilation of the C++ extension.
 - **Monkeypatching**: We deliberately provide a mechanism to overwrite `torch.linalg.svd` to allow users to upgrade existing codebases with zero refactoring.
+
+## Optimization Strategy
+- **Specialized Kernels**: 
+  - **N <= 64**: Warp-synchronous kernels (TPP=32).
+  - **N = 128**: Half-warp kernels (TPP=16).
+  - **N = 256**: Quarter-warp kernels (TPP=8).
+  - **N > 256**: Generic Block Jacobi or rSVD.
+- **Batched Throughput**: Focus on minimizing kernel launch overhead by fusing the entire Jacobi sweep into a single persistent kernel.
 
 ## Developer Notes & Gotchas
 
@@ -35,10 +43,18 @@
 
 ### 2. Metal Versioning on MPS
 **Symptom**: Crash or `nil` PSO (Pipeline State Object) when `options.languageVersion = MTLLanguageVersion3_0` is set.
-**Cause**: Not all Apple Silicon devices/OS combinations report strict Metal 3.0 compliance in the way `MTLCompileOptions` expects, even if they support the features.
-**Solution**: Rely on the default compiler version (leave `languageVersion` unset) unless strictly necessary. For `bfloat16`, check `__METAL_VERSION__ >= 310` inside the shader code rather than forcing the compiler version host-side.
+**Cause**: Not all Apple Silicon devices/OS combinations report strict Metal 3.0 compliance in the way `MTLCompileOptions` expects.
+**Solution**: Rely on the default compiler version. For `bfloat16`, check `__METAL_VERSION__ >= 310`.
 
 ### 3. Fused Kernel Safety
 **Symptom**: Race conditions or incorrect reductions in block-Jacobi.
-**Constraint**: The Fused Block-Jacobi kernel (`svd_fused_block_kernel`) enforces `ThreadsPerPair = 1` in the host dispatch logic. While technically inefficient (low occupancy), it is orders of magnitude faster than launching individual kernels for each step ($O(1)$ launch vs $O(N)$ launches). Increasing `ThreadsPerPair` requires careful verification of SIMD-group (wavefront) execution widths, which vary between M1 (32) and other architectures.
+**Constraint**: The Fused Block-Jacobi kernel uses `threadgroup_barrier` for synchronization. For small N (<= 256), we use specialized kernels with hardcoded `ThreadsPerPair` to maximize occupancy and minimize divergence.
+
+## Failed Approaches & Dead Ends
+- **Early Termination via Atomics**: We attempted to use an atomic counter `sweep_rotations` to break the Jacobi loop early if no rotations occurred. determining convergence.
+  - **Result**: Failed. The cost of atomic operations in the hot loop roughly equaled the savings from skipping the last few sweeps. For small matrices, kernel launch latency dominates anyway.
+- **Generic Fused Kernel for N < 128**: We initially used the generic `svd_fused_block_kernel` with `ThreadsPerPair=1` for all sizes.
+  - **Result**: Failed. Performance was 5-10x slower than CPU due to massive thread underutilization (1 thread per pair = 64 items for N=128). Specialized kernels with TPP=16/32 were required.
+- **Dynamic ThreadsPerPair in Shader**: Calculating loop strides based on a uniform `ThreadsPerPair` passed at runtime.
+  - **Result**: Suboptimal. The compiler could not unroll loops or optimize register usage as effectively as with `constant` template parameters or macros. Hardcoded variations (N=64, 128) proved significantly faster.
 

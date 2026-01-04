@@ -1,0 +1,6 @@
+graft native_bundled
+graft src
+include README.md
+include LICENSE
+include pyproject.toml
+include setup.py

@@ -22,3 +22,6 @@ venv/
 # Logs
 *.log
 venv_*
+
+# Monorepo artifacts
+native_bundled/

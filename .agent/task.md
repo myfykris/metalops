@@ -58,4 +58,16 @@
   [x] Stress Breaker (Fuzzing & Edge Cases: NaN, Zero, Rank-1, Ill-cond)
   [x] Publish to PyPI (Wheels built)
   [x] Build Wheels for Python 3.10, 3.11, 3.12, 3.13, 3.14 (Multi-version Support)
-  [x] Refactor to Src-Layout (PyPI standard compliance)
+  
+[ ] User Directed Optimization (v0.0.3)
+  [x] Benchmarking Infrastructure
+    [x] Create comprehensive `benchmark_suite.py`
+    [x] Add user-prioritized geometries (Huge)
+  [x] Specialized Kernels for Small/Medium
+    [x] Implement Fused Kernel (N=64, 128, 256)
+    [x] Fix compilation errors (structs, PSOs)
+  [x] Optimize Huge Matrices (4096 x 11008)
+    [x] Enable ICB for N >= 256 (Fixed Segfaults)
+    [x] Tune Threadgroup Size (1024 threads)
+    [x] Implement Vectorized Kernel (float4) -> Attempted (Slower, Reverted)
+  [x] Optimize Micro Matrices (N < 32) -> Not Prioritized (Baseline sufficient)

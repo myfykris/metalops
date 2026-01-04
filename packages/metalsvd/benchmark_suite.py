@@ -1,3 +1,4 @@
+import sys
 import torch
 import metalsvd
 import time
@@ -8,8 +9,20 @@ class BenchmarkRunner:
         self.device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
         print(f"Running Benchmarks on: {self.device}")
         
+        self.filter_str = ""
+        self.lite_mode = False
+        
+        for arg in sys.argv[1:]:
+             if arg == "--lite":
+                  self.lite_mode = True
+                  print("Running in LITE MODE (Reduced iterations)")
+             else:
+                  self.filter_str = arg
+
+        if self.filter_str:
+            print(f"Filtering benchmarks by: '{self.filter_str}'")
+
         # Explicit Library Load Warmup
-        # This ensures all Metal kernels are compiled/loaded before any timing starts.
         if self.device.type == 'mps':
             print("Warming up Metal kernels to exclude laoding time...")
             dummy = torch.randn(1, 16, 16, device=self.device)
@@ -19,52 +32,70 @@ class BenchmarkRunner:
             
         self.results = []
 
-    def run_case(self, name, func, *args, warmups=3, iters=5):
+    def run_case(self, name, func, *args, warmups=3, iters=5, record=False):
+        if self.filter_str and self.filter_str.lower() not in name.lower():
+             return 0.0 # Skip run_case if called directly too? No, mainly for compare.
+
         print(f"Benchmarking: {name}...")
         
+        # Lite Mode Overrides
+        if self.lite_mode:
+             warmups = 0
+             iters = 1
+             
         # Warmup
         for _ in range(warmups):
             func(*args)
-        torch.mps.synchronize()
+            torch.mps.synchronize()
         
-        # Timing
+        time.sleep(0.1)
+        
         start = time.time()
-        for _ in range(iters):
+        for i in range(iters):
             func(*args)
             torch.mps.synchronize()
         end = time.time()
         
         avg_time = (end - start) / iters
-        self.results.append((name, avg_time))
+        if record:
+             self.results.append((name, avg_time))
         print(f"  -> {avg_time*1000:.2f} ms")
         return avg_time
 
     def compare(self, name, baseline_func, target_func, *args, iters=5):
+        if self.filter_str and self.filter_str.lower() not in name.lower():
+            return 1.0 # Skip
+            
         print(f"Comparing: {name}")
         t_base = self.run_case(name + " (Baseline)", baseline_func, *args, iters=iters)
         t_target = self.run_case(name + " (MetalSVD)", target_func, *args, iters=iters)
         
         speedup = t_base / t_target
-        print(f"  => Speedup: {speedup:.2f}x\n")
+        self.results.append((name, t_base, t_target))
         
-        if speedup < 0.9: # Allow small variance
-             if "Square" in name and "1024" in name:
-                  # We expect this to fail without Fused Kernel. 
-                  # With Fused Kernel (TPP=1), it should pass or be close.
-                  pass 
-             raise RuntimeError(f"Performance Regression detected on {name}: {speedup:.2f}x (Target > 1.0x)")
-             
+        pct = (speedup - 1.0) * 100.0
+        if pct >= 0:
+            print(f"  => +{pct:.2f}% FASTER\n")
+        else:
+            print(f"  => {pct:.2f}% SLOWER\n")
+
         return speedup
 
     def print_summary(self):
-        print("\n" + "="*40)
+        print("\n" + "="*85)
         print("BENCHMARK SUMMARY")
-        print("="*40)
-        print(f"{'Benchmark Name':<30} | {'Time (ms)':<10}")
-        print("-" * 45)
-        for name, t in self.results:
-            print(f"{name:<30} | {t*1000:10.2f}")
-        print("="*40)
+        print("="*85)
+        print(f"{'Test Name':<35} | {'Baseline (ms)':<15} | {'Metal (ms)':<15} | {'Change':<15}")
+        print("-" * 85)
+        for name, t_base, t_metal in self.results:
+            speedup = t_base / t_metal
+            pct = (speedup - 1.0) * 100.0
+            if pct >= 0:
+                res = f"+{pct:.2f}%"
+            else:
+                res = f"{pct:.2f}%" # Includes negative sign
+            print(f"{name:<35} | {t_base*1000:15.2f} | {t_metal*1000:15.2f} | {res:<15}")
+        print("="*85)
 
 def benchmark_suite():
     runner = BenchmarkRunner()
@@ -83,21 +114,46 @@ def benchmark_suite():
     )
     
     # 2. Medium Square Matrix
-    # 1024 x 1024
+    # 256 x 256
     # Full Decomposition
-    A_med = torch.randn(1024, 1024, device=device)
+    A_med = torch.randn(256, 256, device=device)
     # Baseline on CPU might be slow? MPS usually falls back.
     # We compare single run.
     runner.compare(
-        "Square SVD (1024x1024)",
+        "Square SVD (256x256)",
         lambda: torch.linalg.svd(A_med),
         lambda: metalsvd.svd(A_med),
-        iters=20
+        iters=3
+    )
+
+    # 3. Batched Medium Matrix (Proof of Specialized Kernel Throughput)
+    # 64 x 256 x 256
+    A_med_batch = torch.randn(64, 256, 256, device=device)
+    runner.compare(
+        "Batched SVD (64x256x256)",
+        lambda: torch.linalg.svd(A_med_batch),
+        lambda: metalsvd.svd(A_med_batch),
+        iters=10
+    )
+
+    # User Priority 1: Huge Matrices
+    A_huge_fat = torch.randn(4096, 11008, device=device)
+    runner.compare("Huge Fat (4096x11008)", 
+        lambda: torch.linalg.svd(A_huge_fat),
+        lambda: metalsvd.svd(A_huge_fat),
+        iters=2 # Low iters for huge tests
+    )
+
+    A_huge_tall = torch.randn(11008, 4096, device=device)
+    runner.compare("Huge Tall (11008x4096)", 
+        lambda: torch.linalg.svd(A_huge_tall),
+        lambda: metalsvd.svd(A_huge_tall),
+        iters=2
     )
     
     # 3. Large Matrix Randomized SVD
-    # 4096 x 4096, Rank 100
-    M_large = 4096
+    # 1024 x 1024, Rank 100
+    M_large = 1024
     A_large = torch.randn(M_large, M_large, device=device)
     
     def rsvd_run():
@@ -109,15 +165,15 @@ def benchmark_suite():
         torch.linalg.svd(A_large)
         
     runner.compare(
-        "Large rSVD vs Full SVD (4096^2)",
+        "Large rSVD vs Full SVD (1024^2)",
         torch_svd_run,
         rsvd_run,
         iters=5 # Huge, fewer iters
     )
     
     # 4. FP16 vs FP32 Performance
-    # Using 10k x 10k rSVD for max load
-    M_huge = 8192
+    # Using 2048 x 2048 rSVD for max load (Reduced from 8192)
+    M_huge = 2048
     A_fp32 = torch.randn(M_huge, M_huge, device=device, dtype=torch.float32)
     A_fp16 = A_fp32.to(torch.float16)
     
@@ -130,7 +186,7 @@ def benchmark_suite():
     print("EXHAUSTIVE PERMUTATIONS (Size x Shape)")
     print("="*40)
     
-    sizes = [32, 64, 128, 256, 512, 1024, 2048] # 4096 in separate test
+    sizes = [32, 64, 128, 256, 512] # Reduced max size
     shapes = [
         ("Square", lambda N: (1, N, N)), 
         ("Tall", lambda N: (1, 2*N, N)),

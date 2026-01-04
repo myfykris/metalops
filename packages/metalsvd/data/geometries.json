@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Batched Small",
+    "shape": [64, 128, 128],
+    "desc": "Attention Heads / LoRA"
+  },
+  {
+    "name": "Medium Square",
+    "shape": [1, 256, 256],
+    "desc": "Full Decomposition"
+  },
+  {
+    "name": "Batched Medium",
+    "shape": [64, 256, 256],
+    "desc": "Throughput Test"
+  },
+  {
+    "name": "Huge Fat",
+    "shape": [1, 4096, 11008],
+    "desc": "User Priority 1"
+  },
+  {
+    "name": "Huge Tall",
+    "shape": [1, 11008, 4096],
+    "desc": "User Priority 1"
+  },
+  {
+    "name": "Large rSVD",
+    "shape": [1, 1024, 1024],
+    "desc": "Randomized SVD Benchmark"
+  },
+  {
+    "name": "Huge rSVD",
+    "shape": [1, 2048, 2048],
+    "desc": "FP16 vs FP32 Stress Test"
+  },
+  {
+    "name": "Permutations",
+    "sizes": [32, 64, 128, 256, 512],
+    "shapes": ["Square", "Tall (2x)", "Wide (2x)"]
+  }
+]
