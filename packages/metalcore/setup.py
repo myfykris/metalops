@@ -30,8 +30,9 @@ class CustomBuildExtension(BuildExtension):
 
 setup(
     name='metalcore',
-    version='0.1.0',
-    author='Kris Bailey via Antigravity',
+    version='0.1.1',
+    author='Kris Bailey',
+    author_email='kris@krisbailey.com',
     description='Foundational Metal Linear Algebra Primitives for PyTorch',
     packages=find_packages(where='src'),
     package_dir={'': 'src'},
