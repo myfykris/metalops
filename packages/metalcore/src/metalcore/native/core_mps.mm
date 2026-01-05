@@ -120,6 +120,57 @@ struct CoreKernels {
     
     id<MTLFunction> traceBatched = nil;
     id<MTLComputePipelineState> traceBatchedPSO = nil;
+
+    // Training Ops (RMSNorm, AdamW)
+    id<MTLFunction> rmsnormFwd = nil;
+    id<MTLComputePipelineState> rmsnormFwdPSO = nil;
+    
+    id<MTLFunction> rmsnormBwdDx = nil;
+    id<MTLComputePipelineState> rmsnormBwdDxPSO = nil;
+
+    id<MTLFunction> rmsnormBwdDw = nil;
+    id<MTLComputePipelineState> rmsnormBwdDwPSO = nil;
+    
+    // Vectorized RMSNorm
+    id<MTLFunction> rmsnormFwdVec4 = nil;
+    id<MTLComputePipelineState> rmsnormFwdVec4PSO = nil;
+    id<MTLFunction> rmsnormBwdDxVec4 = nil;
+    id<MTLComputePipelineState> rmsnormBwdDxVec4PSO = nil;
+    id<MTLFunction> rmsnormBwdDwVec4 = nil;
+    id<MTLComputePipelineState> rmsnormBwdDwVec4PSO = nil;
+    
+    id<MTLFunction> adamwStep = nil;
+    id<MTLComputePipelineState> adamwStepPSO = nil;
+    
+    id<MTLFunction> adamwStepScalar = nil;
+    id<MTLComputePipelineState> adamwStepScalarPSO = nil;
+    
+    // Activation Kernels
+    id<MTLFunction> geluFwd = nil;
+    id<MTLComputePipelineState> geluFwdPSO = nil;
+    id<MTLFunction> geluBwd = nil;
+    id<MTLComputePipelineState> geluBwdPSO = nil;
+    id<MTLFunction> siluFwd = nil;
+    id<MTLComputePipelineState> siluFwdPSO = nil;
+    id<MTLFunction> siluBwd = nil;
+    id<MTLComputePipelineState> siluBwdPSO = nil;
+    id<MTLFunction> biasGeluFwd = nil;
+    id<MTLComputePipelineState> biasGeluFwdPSO = nil;
+    id<MTLFunction> biasSiluFwd = nil;
+    id<MTLComputePipelineState> biasSiluFwdPSO = nil;
+    id<MTLFunction> geluFwdScalar = nil;
+    id<MTLComputePipelineState> geluFwdScalarPSO = nil;
+    id<MTLFunction> siluFwdScalar = nil;
+    id<MTLComputePipelineState> siluFwdScalarPSO = nil;
+    
+    // SDPA
+    id<MTLFunction> attentionNaive = nil;
+    id<MTLComputePipelineState> attentionNaivePSO = nil;
+    id<MTLFunction> flashAttentionFwdV2 = nil;
+    id<MTLComputePipelineState> flashAttentionFwdV2PSO = nil;
+    id<MTLFunction> flashAttentionBwdV2 = nil;
+    id<MTLComputePipelineState> flashAttentionBwdV2PSO = nil;
+
 };
 
 static CoreKernels kernels;
@@ -251,6 +302,14 @@ void load_core_kernels() {
         kernels.softmaxBatched = [coreLib newFunctionWithName:@"softmax_batched_kernel"];
         kernels.traceBatched = [coreLib newFunctionWithName:@"trace_batched_kernel"];
         
+        // Training Ops
+        kernels.rmsnormFwd = [coreLib newFunctionWithName:@"rmsnorm_fwd"];
+        kernels.rmsnormBwdDx = [coreLib newFunctionWithName:@"rmsnorm_bwd_dx"];
+        kernels.rmsnormBwdDw = [coreLib newFunctionWithName:@"rmsnorm_bwd_dw"];
+        kernels.adamwStep = [coreLib newFunctionWithName:@"adamw_step"];
+        
+
+        
         // Create pipeline states
         if (kernels.geqr2) {
             kernels.geqr2PSO = [device newComputePipelineStateWithFunction:kernels.geqr2 error:&error];
@@ -356,6 +415,70 @@ void load_core_kernels() {
             kernels.traceBatchedPSO = [device newComputePipelineStateWithFunction:kernels.traceBatched error:&error];
             if (!kernels.traceBatchedPSO) printf("Failed to create traceBatchedPSO: %s\n", [[error localizedDescription] UTF8String]);
         }
+        
+        if (kernels.rmsnormFwd) {
+            kernels.rmsnormFwdPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormFwd error:&error];
+        }
+        if (kernels.rmsnormBwdDx) {
+            kernels.rmsnormBwdDxPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDx error:&error];
+        }
+        if (kernels.rmsnormBwdDw) {
+            kernels.rmsnormBwdDwPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDw error:&error];
+        }
+        if (kernels.adamwStep) {
+            kernels.adamwStepPSO = [device newComputePipelineStateWithFunction:kernels.adamwStep error:&error];
+        }
+        
+        // Vectorized kernels
+        kernels.rmsnormFwdVec4 = [coreLib newFunctionWithName:@"rmsnorm_fwd_vec4"];
+        kernels.rmsnormBwdDxVec4 = [coreLib newFunctionWithName:@"rmsnorm_bwd_dx_vec4"];
+        kernels.rmsnormBwdDwVec4 = [coreLib newFunctionWithName:@"rmsnorm_bwd_dw_vec4"];
+        
+        if (kernels.rmsnormFwdVec4) {
+            kernels.rmsnormFwdVec4PSO = [device newComputePipelineStateWithFunction:kernels.rmsnormFwdVec4 error:&error];
+        }
+        if (kernels.rmsnormBwdDxVec4) {
+            kernels.rmsnormBwdDxVec4PSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDxVec4 error:&error];
+        }
+        if (kernels.rmsnormBwdDwVec4) {
+            kernels.rmsnormBwdDwVec4PSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDwVec4 error:&error];
+        }
+        
+        // Scalar AdamW
+        kernels.adamwStepScalar = [coreLib newFunctionWithName:@"adamw_step_scalar"];
+        if (kernels.adamwStepScalar) {
+             kernels.adamwStepScalarPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepScalar error:&error];
+        }
+        
+        // Activation Kernels
+        kernels.geluFwd = [coreLib newFunctionWithName:@"gelu_fwd"];
+        kernels.geluBwd = [coreLib newFunctionWithName:@"gelu_bwd"];
+        kernels.siluFwd = [coreLib newFunctionWithName:@"silu_fwd"];
+        kernels.siluBwd = [coreLib newFunctionWithName:@"silu_bwd"];
+        kernels.biasGeluFwd = [coreLib newFunctionWithName:@"bias_gelu_fwd"];
+        kernels.biasSiluFwd = [coreLib newFunctionWithName:@"bias_silu_fwd"];
+        kernels.geluFwdScalar = [coreLib newFunctionWithName:@"gelu_fwd_scalar"];
+        kernels.siluFwdScalar = [coreLib newFunctionWithName:@"silu_fwd_scalar"];
+        
+        if (kernels.geluFwd) kernels.geluFwdPSO = [device newComputePipelineStateWithFunction:kernels.geluFwd error:&error];
+        if (kernels.geluBwd) kernels.geluBwdPSO = [device newComputePipelineStateWithFunction:kernels.geluBwd error:&error];
+        if (kernels.siluFwd) kernels.siluFwdPSO = [device newComputePipelineStateWithFunction:kernels.siluFwd error:&error];
+        if (kernels.siluBwd) kernels.siluBwdPSO = [device newComputePipelineStateWithFunction:kernels.siluBwd error:&error];
+        if (kernels.biasGeluFwd) kernels.biasGeluFwdPSO = [device newComputePipelineStateWithFunction:kernels.biasGeluFwd error:&error];
+        if (kernels.biasSiluFwd) kernels.biasSiluFwdPSO = [device newComputePipelineStateWithFunction:kernels.biasSiluFwd error:&error];
+        if (kernels.geluFwdScalar) kernels.geluFwdScalarPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdScalar error:&error];
+        if (kernels.siluFwdScalar) kernels.siluFwdScalarPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdScalar error:&error];
+        
+        // SDPA
+        kernels.attentionNaive = [coreLib newFunctionWithName:@"attention_naive"];
+        if (kernels.attentionNaive) kernels.attentionNaivePSO = [device newComputePipelineStateWithFunction:kernels.attentionNaive error:&error];
+        
+        kernels.flashAttentionFwdV2 = [coreLib newFunctionWithName:@"flash_attention_fwd_v2"];
+        if (kernels.flashAttentionFwdV2) kernels.flashAttentionFwdV2PSO = [device newComputePipelineStateWithFunction:kernels.flashAttentionFwdV2 error:&error];
+        
+        kernels.flashAttentionBwdV2 = [coreLib newFunctionWithName:@"flash_attention_bwd_v2"];
+        if (kernels.flashAttentionBwdV2) kernels.flashAttentionBwdV2PSO = [device newComputePipelineStateWithFunction:kernels.flashAttentionBwdV2 error:&error];
+
         
         printf("metalcore: Loaded %d kernel functions\n", 
             (kernels.geqr2 ? 1 : 0) + (kernels.householder ? 1 : 0) + 
@@ -2006,76 +2129,253 @@ std::vector<torch::Tensor> eigh_forward(torch::Tensor A) {
 // Python Bindings
 // -----------------------------------------------------------------------------
 
-PYBIND11_MODULE(metalcore_backend, m) {
-    m.def("trsm", &trsm_metal, "Triangular solve on Metal",
-          py::arg("A"), py::arg("b"), py::arg("lower") = true, py::arg("transpose") = false);
+// -----------------------------------------------------------------------------
+// RMSNorm
+// -----------------------------------------------------------------------------
+
+std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torch::Tensor W, float eps) {
+    load_core_kernels();
     
-    m.def("geqr2", &geqr2_metal, "Panel QR factorization (unblocked Householder)",
-          py::arg("A"));
+    // Checks...
+    TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS");
+    TORCH_CHECK(W.device().type() == at::kMPS, "W must be on MPS");
     
-    m.def("larfb", &larfb_metal, "Apply block Householder reflector",
-          py::arg("C"), py::arg("V"), py::arg("T"), py::arg("trans") = true, py::arg("panel_start") = 0);
+    int64_t B = X.size(0);
+    int64_t N = X.size(1);
     
-    m.def("larft", &larft_metal, "Build triangular factor T for WY representation",
-          py::arg("V"), py::arg("tau"), py::arg("panel_start") = 0);
+    auto Y = torch::empty_like(X);
+    auto Rstd = torch::empty({B}, X.options());
     
-    m.def("qr", &qr_metal, "Blocked Householder QR decomposition",
-          py::arg("A"), py::arg("block_size") = 32);
+    // Check for vectorization: N divisible by 4, contiguous, aligned offsets
+    bool use_vec4 = kernels.rmsnormFwdVec4PSO && 
+                    (N % 4 == 0) && 
+                    X.is_contiguous() && W.is_contiguous() && 
+                    (X.storage_offset() % 4 == 0) && 
+                    (W.storage_offset() % 4 == 0);
+
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        if (use_vec4) {
+             [encoder setComputePipelineState:kernels.rmsnormFwdVec4PSO];
+             // N/4 threads covers the width
+             // Tune: Use 256 threads to increase work-per-thread and improve occupancy vs 1024
+             NSUInteger threads = std::min((NSUInteger)(N / 4), (NSUInteger)256);
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * 4 atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3];
+             uint32_t N_u = (uint32_t)N;
+             [encoder setBytes:&N_u length:4 atIndex:4];
+             [encoder setBytes:&eps length:4 atIndex:5];
+             [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+        } else {
+             // Scalar Path
+             [encoder setComputePipelineState:kernels.rmsnormFwdPSO];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * 4 atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3];
+             uint32_t N_u = (uint32_t)N;
+             [encoder setBytes:&N_u length:4 atIndex:4];
+             [encoder setBytes:&eps length:4 atIndex:5];
+             NSUInteger threads = std::min((NSUInteger)N, (NSUInteger)1024);
+             [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+        }
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
     
-    m.def("qr_fused", &qr_fused_metal, "Fully fused QR (single Metal dispatch)",
-          py::arg("A"));
+    return std::make_tuple(Y, Rstd);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> rmsnorm_bwd_metal(torch::Tensor dY, torch::Tensor X, torch::Tensor Rstd, torch::Tensor W) {
+    load_core_kernels();
     
-    m.def("qr_batched", &qr_batched_metal, "Batched QR (parallel matrices in single dispatch)",
-          py::arg("A_batch"));
+    int64_t B = X.size(0);
+    int64_t N = X.size(1);
     
-    m.def("trsm_batched", &trsm_batched_metal, "Batched triangular solve",
-          py::arg("R"), py::arg("B"));
+    auto dX = torch::empty_like(X);
+    auto dW = torch::empty_like(W);
     
-    m.def("solve_batched", &solve_batched_metal, "Fused batched solve (QR + Q.T@b + TRSM)",
-          py::arg("A"), py::arg("b"));
+    if (!kernels.rmsnormBwdDxPSO || !kernels.rmsnormBwdDwPSO) {
+        return std::make_tuple(dX, dW);
+    }
     
-    m.def("column_norms", &column_norms_metal, "Compute column norms",
-          py::arg("A"));
+    bool use_vec4 = kernels.rmsnormBwdDxVec4PSO && kernels.rmsnormBwdDwVec4PSO &&
+                    (N % 4 == 0) && 
+                    dY.is_contiguous() && X.is_contiguous() && W.is_contiguous() &&
+                    (dY.storage_offset() % 4 == 0) && (X.storage_offset() % 4 == 0) && (W.storage_offset() % 4 == 0);
+
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        if (use_vec4) {
+             // 1. Compute dX (Vectorized)
+             [encoder setComputePipelineState:kernels.rmsnormBwdDxVec4PSO];
+             // Tune: 256 threads
+             NSUInteger threads = std::min((NSUInteger)(N / 4), (NSUInteger)256);
+             
+             [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * 4 atIndex:3];
+             [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * 4 atIndex:4];
+             uint32_t N_u = (uint32_t)N;
+             [encoder setBytes:&N_u length:4 atIndex:5];
+             [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+             
+             // 2. Compute dW (Vectorized)
+             [encoder setComputePipelineState:kernels.rmsnormBwdDwVec4PSO];
+             [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(dW) offset:dW.storage_offset() * 4 atIndex:3];
+             [encoder setBytes:&N_u length:4 atIndex:4];
+             uint32_t B_u = (uint32_t)B;
+             [encoder setBytes:&B_u length:4 atIndex:5];
+             
+             // N / 4 items to sum
+             NSUInteger dw_threads = (NSUInteger)(N / 4);
+             NSUInteger dw_tg_size = std::min(dw_threads, (NSUInteger)1024);
+             NSUInteger dw_groups = (dw_threads + dw_tg_size - 1) / dw_tg_size;
+             [encoder dispatchThreadgroups:MTLSizeMake(dw_groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(dw_tg_size, 1, 1)];
+
+        } else {
+             // Scalar Path
+             // 1. Compute dX
+             [encoder setComputePipelineState:kernels.rmsnormBwdDxPSO];
+             [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * 4 atIndex:3];
+             [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * 4 atIndex:4];
+             uint32_t N_u = (uint32_t)N;
+             [encoder setBytes:&N_u length:4 atIndex:5];
+             NSUInteger threads = std::min((NSUInteger)N, (NSUInteger)1024);
+             [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+             
+             // 2. Compute dW
+             [encoder setComputePipelineState:kernels.rmsnormBwdDwPSO];
+             [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(dW) offset:dW.storage_offset() * 4 atIndex:3];
+             [encoder setBytes:&N_u length:4 atIndex:4];
+             uint32_t B_u = (uint32_t)B;
+             [encoder setBytes:&B_u length:4 atIndex:5];
+             NSUInteger dw_threads = (NSUInteger)N;
+             NSUInteger dw_tg_size = std::min(dw_threads, (NSUInteger)1024);
+             NSUInteger dw_groups = (dw_threads + dw_tg_size - 1) / dw_tg_size;
+             [encoder dispatchThreadgroups:MTLSizeMake(dw_groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(dw_tg_size, 1, 1)];
+        }
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
     
-    m.def("cholesky_batched", &cholesky_batched_metal, "Batched Cholesky decomposition",
-          py::arg("A"));
+    return std::make_tuple(dX, dW);
+}
+
+// -----------------------------------------------------------------------------
+// AdamW
+// -----------------------------------------------------------------------------
+
+void adamw_step_metal(
+    torch::Tensor params,
+    torch::Tensor grads,
+    torch::Tensor exp_avg,
+    torch::Tensor exp_avg_sq,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float correction1,
+    float correction2
+) {
+    load_core_kernels();
     
-    m.def("cholesky_solve_batched", &cholesky_solve_batched_metal, "Batched Cholesky solve",
-          py::arg("L"), py::arg("b"));
+    TORCH_CHECK(params.is_contiguous(), "params must be contig");
+    TORCH_CHECK(grads.is_contiguous(), "grads must be contig");
     
-    // SVD (ported from metalsvd)
-    m.def("svd_forward", &svd_forward, "Batched SVD (Metal Jacobi)",
-          py::arg("A"));
+    int64_t numel = params.numel();
     
-    // Eigendecomposition (ported from metaleig)
-    m.def("eigh_forward", &eigh_forward, "Batched Eigendecomposition (Metal Jacobi)",
-          py::arg("A"));
+    // We vectorize by 4 (float4), so launch numel/4 threads
+    // Ensure tensors are float32
     
-    // New optimization kernels
-    m.def("column_norm_sort", &column_norm_sort_metal, "De Rijk column sorting for SVD optimization",
-          py::arg("A"));
+    if (!kernels.adamwStepPSO) return;
     
-    m.def("sign_canonicalize", &sign_canonicalize_metal, "SVD sign canonicalization (in-place)",
-          py::arg("U"), py::arg("V"));
+    // Split into vectorized (divisible by 4) and scalar tail
+    int64_t numel_vec = numel / 4;
+    int64_t tail = numel % 4;
     
-    m.def("batched_qt_b", &batched_qt_b_metal, "Batched Q.T @ b for fused solve",
-          py::arg("Q"), py::arg("b"));
-    
-    // High-impact ML/LA kernels
-    m.def("lu_batched", &lu_batched_metal, "Batched LU decomposition with pivoting",
-          py::arg("A"));
-    
-    m.def("syrk_batched", &syrk_batched_metal, "Batched SYRK: C = A.T @ A",
-          py::arg("A"));
-    
-    m.def("frobenius_norm_batched", &frobenius_norm_batched_metal, "Batched Frobenius norm",
-          py::arg("A"));
-    
-    m.def("softmax_batched", &softmax_batched_metal, "Batched softmax with temperature",
-          py::arg("x"), py::arg("temperature") = 1.0f);
-    
-    m.def("trace_batched", &trace_batched_metal, "Batched trace (sum of diagonal)",
-          py::arg("A"));
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        // 1. Vectorized Body (float4)
+        if (numel_vec > 0) {
+            [encoder setComputePipelineState:kernels.adamwStepPSO];
+            [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*4 atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*4 atIndex:1];
+            [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*4 atIndex:2];
+            [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*4 atIndex:3];
+            
+            [encoder setBytes:&lr length:4 atIndex:4];
+            [encoder setBytes:&beta1 length:4 atIndex:5];
+            [encoder setBytes:&beta2 length:4 atIndex:6];
+            [encoder setBytes:&eps length:4 atIndex:7];
+            [encoder setBytes:&weight_decay length:4 atIndex:8];
+            [encoder setBytes:&correction1 length:4 atIndex:9];
+            [encoder setBytes:&correction2 length:4 atIndex:10];
+            
+            NSUInteger num_threads = (NSUInteger)numel_vec;
+            NSUInteger tg_size = std::min((NSUInteger)num_threads, (NSUInteger)256); // Tuned for occupancy
+            NSUInteger num_groups = (num_threads + tg_size - 1) / tg_size;
+            
+            [encoder dispatchThreadgroups:MTLSizeMake(num_groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        }
+        
+        // 2. Scalar Tail (float)
+        if (tail > 0 && kernels.adamwStepScalarPSO) {
+             [encoder setComputePipelineState:kernels.adamwStepScalarPSO];
+             // Offset by numel_vec * 4 (float4 size) = numel_vec * 16 bytes? 
+             // No, offset is in bytes. X.storage_offset() is in elements.
+             // We need to pointer arithmetic.
+             // Actually, easier to dispatch scalar kernel with `id + offset` or just launch threads for [numel_vec*4 ... numel]
+             // Metal kernel uses `id` as index.
+             // Let's just launch `tail` threads and pass an offset.
+             // But my scalar kernel takes `id [[thread_position_in_grid]]` and accesses params[id].
+             // So I need to set the buffer offset to point to the tail.
+             
+             int64_t offset_elems = numel_vec * 4;
+             int64_t offset_bytes = offset_elems * 4; // 4 bytes per float
+             
+             [encoder setBuffer:getMTLBufferStorage(params) offset:(params.storage_offset()*4 + offset_bytes) atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(grads) offset:(grads.storage_offset()*4 + offset_bytes) atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:(exp_avg.storage_offset()*4 + offset_bytes) atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:(exp_avg_sq.storage_offset()*4 + offset_bytes) atIndex:3];
+             
+             [encoder setBytes:&lr length:4 atIndex:4];
+             [encoder setBytes:&beta1 length:4 atIndex:5];
+             [encoder setBytes:&beta2 length:4 atIndex:6];
+             [encoder setBytes:&eps length:4 atIndex:7];
+             [encoder setBytes:&weight_decay length:4 atIndex:8];
+             [encoder setBytes:&correction1 length:4 atIndex:9];
+             [encoder setBytes:&correction2 length:4 atIndex:10];
+             
+             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
+        } else if (tail > 0) {
+            printf("metalcore: Warning - No scalar AdamW kernel, tail ignored!\n");
+        }
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2195,3 +2495,382 @@ torch::Tensor cholesky_solve_batched_metal(torch::Tensor L, torch::Tensor b) {
     
     return b.dim() == 2 ? x.squeeze(-1) : x;
 }
+// -----------------------------------------------------------------------------
+// Activation Functions (GELU / SiLU)
+// -----------------------------------------------------------------------------
+
+torch::Tensor gelu_fwd_metal(torch::Tensor X) {
+    load_core_kernels();
+    
+    TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
+    TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+    
+    auto Y = torch::empty_like(X);
+    int64_t numel = X.numel();
+    
+    if (!kernels.geluFwdPSO) {
+        // CPU fallback
+        return torch::gelu(X);
+    }
+    
+    int64_t numel_vec = numel / 4;
+    int64_t tail = numel % 4;
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        if (numel_vec > 0) {
+            [encoder setComputePipelineState:kernels.geluFwdPSO];
+            [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:1];
+            uint32_t numel_u = (uint32_t)numel;
+            [encoder setBytes:&numel_u length:4 atIndex:2];
+            
+            NSUInteger threads = (NSUInteger)numel_vec;
+            NSUInteger tg_size = std::min(threads, (NSUInteger)256);
+            NSUInteger groups = (threads + tg_size - 1) / tg_size;
+            [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        }
+        
+        if (tail > 0 && kernels.geluFwdScalarPSO) {
+            [encoder setComputePipelineState:kernels.geluFwdScalarPSO];
+            int64_t offset = numel_vec * 4 * 4; // bytes
+            [encoder setBuffer:getMTLBufferStorage(X) offset:(X.storage_offset() * 4 + offset) atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * 4 + offset) atIndex:1];
+            [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
+        }
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return Y;
+}
+
+torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
+    load_core_kernels();
+    
+    TORCH_CHECK(dY.device().type() == at::kMPS, "dY must be on MPS device");
+    TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
+    
+    auto dX = torch::empty_like(X);
+    int64_t numel = X.numel();
+    
+    if (!kernels.geluBwdPSO) {
+        // CPU fallback via autograd
+        auto X_cpu = X.cpu().requires_grad_(true);
+        auto Y_cpu = torch::gelu(X_cpu);
+        Y_cpu.backward(dY.cpu());
+        return X_cpu.grad().to(X.device());
+    }
+    
+    int64_t numel_vec = numel / 4;
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        // Ensure any prior encode operations are committed before creating a new encoder
+        stream->synchronize(SyncType::COMMIT);
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.geluBwdPSO];
+        [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * 4 atIndex:2];
+        uint32_t numel_u = (uint32_t)numel;
+        [encoder setBytes:&numel_u length:4 atIndex:3];
+        
+        NSUInteger threads = (NSUInteger)numel_vec;
+        NSUInteger tg_size = std::min(threads, (NSUInteger)256);
+        NSUInteger groups = (threads + tg_size - 1) / tg_size;
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return dX;
+}
+
+torch::Tensor silu_fwd_metal(torch::Tensor X) {
+    load_core_kernels();
+    
+    TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
+    TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
+    
+    auto Y = torch::empty_like(X);
+    int64_t numel = X.numel();
+    
+    if (!kernels.siluFwdPSO) {
+        return torch::silu(X);
+    }
+    
+    int64_t numel_vec = numel / 4;
+    int64_t tail = numel % 4;
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        if (numel_vec > 0) {
+            [encoder setComputePipelineState:kernels.siluFwdPSO];
+            [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:1];
+            uint32_t numel_u = (uint32_t)numel;
+            [encoder setBytes:&numel_u length:4 atIndex:2];
+            
+            NSUInteger threads = (NSUInteger)numel_vec;
+            NSUInteger tg_size = std::min(threads, (NSUInteger)256);
+            NSUInteger groups = (threads + tg_size - 1) / tg_size;
+            [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        }
+        
+        if (tail > 0 && kernels.siluFwdScalarPSO) {
+            [encoder setComputePipelineState:kernels.siluFwdScalarPSO];
+            int64_t offset = numel_vec * 4 * 4;
+            [encoder setBuffer:getMTLBufferStorage(X) offset:(X.storage_offset() * 4 + offset) atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * 4 + offset) atIndex:1];
+            [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
+        }
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return Y;
+}
+
+torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
+    load_core_kernels();
+    
+    TORCH_CHECK(dY.device().type() == at::kMPS, "dY must be on MPS device");
+    TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
+    
+    auto dX = torch::empty_like(X);
+    int64_t numel = X.numel();
+    
+    if (!kernels.siluBwdPSO) {
+        auto X_cpu = X.cpu().requires_grad_(true);
+        auto Y_cpu = torch::silu(X_cpu);
+        Y_cpu.backward(dY.cpu());
+        return X_cpu.grad().to(X.device());
+    }
+    
+    int64_t numel_vec = numel / 4;
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        stream->synchronize(SyncType::COMMIT);
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.siluBwdPSO];
+        [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * 4 atIndex:2];
+        uint32_t numel_u = (uint32_t)numel;
+        [encoder setBytes:&numel_u length:4 atIndex:3];
+        
+        NSUInteger threads = (NSUInteger)numel_vec;
+        NSUInteger tg_size = std::min(threads, (NSUInteger)256);
+        NSUInteger groups = (threads + tg_size - 1) / tg_size;
+        [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return dX;
+}
+
+// -----------------------------------------------------------------------------
+// Scaled Dot Product Attention
+// -----------------------------------------------------------------------------
+
+torch::Tensor sdpa_fwd_metal(torch::Tensor Q, torch::Tensor K, torch::Tensor V, float scale, bool is_causal) {
+    load_core_kernels();
+    
+    // Expect Q, K, V shape: (B*H, N, D) where B*H = batch * heads
+    TORCH_CHECK(Q.device().type() == at::kMPS, "Q must be on MPS device");
+    TORCH_CHECK(K.device().type() == at::kMPS, "K must be on MPS device");
+    TORCH_CHECK(V.device().type() == at::kMPS, "V must be on MPS device");
+    TORCH_CHECK(Q.dim() == 3, "Q must be 3D (batch_heads, seq_len, head_dim)");
+    
+    int64_t batch_heads = Q.size(0);
+    int64_t seq_len = Q.size(1);
+    int64_t head_dim = Q.size(2);
+    
+    auto O = torch::empty_like(Q);
+    auto L = torch::empty({batch_heads, seq_len}, Q.options());  // logsumexp for backward
+    
+    // Determine which kernel to use
+    // Use Flash Attention v2 for larger sequences, naive for small ones
+    bool use_flash = kernels.flashAttentionFwdV2PSO && (seq_len > 256 || is_causal);
+    bool use_naive = kernels.attentionNaivePSO && seq_len <= 1024 && !is_causal;
+    
+    if (!use_flash && !use_naive) {
+        // CPU fallback
+        return torch::scaled_dot_product_attention(Q, K, V);
+    }
+    
+    Q = Q.contiguous();
+    K = K.contiguous();
+    V = V.contiguous();
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        stream->synchronize(SyncType::COMMIT);
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        if (use_flash) {
+            // Flash Attention v2 - tiled, handles arbitrary sequence lengths
+            [encoder setComputePipelineState:kernels.flashAttentionFwdV2PSO];
+            [encoder setBuffer:getMTLBufferStorage(Q) offset:Q.storage_offset() * 4 atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(K) offset:K.storage_offset() * 4 atIndex:1];
+            [encoder setBuffer:getMTLBufferStorage(V) offset:V.storage_offset() * 4 atIndex:2];
+            [encoder setBuffer:getMTLBufferStorage(O) offset:O.storage_offset() * 4 atIndex:3];
+            [encoder setBuffer:getMTLBufferStorage(L) offset:L.storage_offset() * 4 atIndex:4];
+            
+            uint32_t bh_u = (uint32_t)batch_heads;
+            uint32_t sl_u = (uint32_t)seq_len;
+            uint32_t hd_u = (uint32_t)head_dim;
+            uint32_t causal_u = is_causal ? 1 : 0;
+            [encoder setBytes:&bh_u length:4 atIndex:5];
+            [encoder setBytes:&sl_u length:4 atIndex:6];
+            [encoder setBytes:&hd_u length:4 atIndex:7];
+            [encoder setBytes:&scale length:4 atIndex:8];
+            [encoder setBytes:&causal_u length:4 atIndex:9];
+            
+            // Threadgroup shared memory: K_tile (64*128) + V_tile (64*128) = 2 * 64 * 128 * 4 bytes
+            NSUInteger BLOCK_N = 64;
+            NSUInteger BLOCK_D = 128;
+            NSUInteger shared_mem_size = 2 * BLOCK_N * BLOCK_D * sizeof(float);
+            [encoder setThreadgroupMemoryLength:shared_mem_size atIndex:0];
+            
+            // Grid: (num_q_blocks, batch_heads, 1), each threadgroup handles BLOCK_M queries
+            NSUInteger BLOCK_M = 64;
+            NSUInteger num_q_blocks = (seq_len + BLOCK_M - 1) / BLOCK_M;
+            NSUInteger threads_per_group = std::min((NSUInteger)seq_len, (NSUInteger)BLOCK_M);
+            [encoder dispatchThreadgroups:MTLSizeMake(num_q_blocks, batch_heads, 1) 
+                    threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+        } else {
+            // Naive attention for small sequences (no causal support)
+            [encoder setComputePipelineState:kernels.attentionNaivePSO];
+            [encoder setBuffer:getMTLBufferStorage(Q) offset:Q.storage_offset() * 4 atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(K) offset:K.storage_offset() * 4 atIndex:1];
+            [encoder setBuffer:getMTLBufferStorage(V) offset:V.storage_offset() * 4 atIndex:2];
+            [encoder setBuffer:getMTLBufferStorage(O) offset:O.storage_offset() * 4 atIndex:3];
+            
+            uint32_t bh_u = (uint32_t)batch_heads;
+            uint32_t sl_u = (uint32_t)seq_len;
+            uint32_t hd_u = (uint32_t)head_dim;
+            [encoder setBytes:&bh_u length:4 atIndex:4];
+            [encoder setBytes:&sl_u length:4 atIndex:5];
+            [encoder setBytes:&hd_u length:4 atIndex:6];
+            [encoder setBytes:&scale length:4 atIndex:7];
+            
+            [encoder dispatchThreadgroups:MTLSizeMake(seq_len, batch_heads, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        }
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return O;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sdpa_bwd_metal(
+    torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+    torch::Tensor O, torch::Tensor dO, torch::Tensor L,
+    float scale, bool is_causal
+) {
+    load_core_kernels();
+    
+    TORCH_CHECK(Q.device().type() == at::kMPS, "Q must be on MPS device");
+    TORCH_CHECK(dO.device().type() == at::kMPS, "dO must be on MPS device");
+    TORCH_CHECK(Q.dim() == 3, "Q must be 3D (batch_heads, seq_len, head_dim)");
+    
+    int64_t batch_heads = Q.size(0);
+    int64_t seq_len = Q.size(1);
+    int64_t head_dim = Q.size(2);
+    
+    // Initialize gradients to zero
+    auto dQ = torch::zeros_like(Q);
+    auto dK = torch::zeros_like(K);
+    auto dV = torch::zeros_like(V);
+    
+    if (!kernels.flashAttentionBwdV2PSO) {
+        // CPU fallback
+        TORCH_CHECK(false, "Flash Attention backward kernel not loaded");
+    }
+    
+    Q = Q.contiguous();
+    K = K.contiguous();
+    V = V.contiguous();
+    O = O.contiguous();
+    dO = dO.contiguous();
+    L = L.contiguous();
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        stream->synchronize(SyncType::COMMIT);
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.flashAttentionBwdV2PSO];
+        [encoder setBuffer:getMTLBufferStorage(Q) offset:Q.storage_offset() * 4 atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(K) offset:K.storage_offset() * 4 atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(V) offset:V.storage_offset() * 4 atIndex:2];
+        [encoder setBuffer:getMTLBufferStorage(O) offset:O.storage_offset() * 4 atIndex:3];
+        [encoder setBuffer:getMTLBufferStorage(dO) offset:dO.storage_offset() * 4 atIndex:4];
+        [encoder setBuffer:getMTLBufferStorage(L) offset:L.storage_offset() * 4 atIndex:5];
+        [encoder setBuffer:getMTLBufferStorage(dQ) offset:dQ.storage_offset() * 4 atIndex:6];
+        [encoder setBuffer:getMTLBufferStorage(dK) offset:dK.storage_offset() * 4 atIndex:7];
+        [encoder setBuffer:getMTLBufferStorage(dV) offset:dV.storage_offset() * 4 atIndex:8];
+        
+        uint32_t bh_u = (uint32_t)batch_heads;
+        uint32_t sl_u = (uint32_t)seq_len;
+        uint32_t hd_u = (uint32_t)head_dim;
+        uint32_t causal_u = is_causal ? 1 : 0;
+        [encoder setBytes:&bh_u length:4 atIndex:9];
+        [encoder setBytes:&sl_u length:4 atIndex:10];
+        [encoder setBytes:&hd_u length:4 atIndex:11];
+        [encoder setBytes:&scale length:4 atIndex:12];
+        [encoder setBytes:&causal_u length:4 atIndex:13];
+        
+        // Grid: (seq_len, batch_heads)
+        [encoder dispatchThreadgroups:MTLSizeMake(seq_len, batch_heads, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return {dQ, dK, dV};
+}
+
+PYBIND11_MODULE(metalcore_backend, m) {
+    m.def("trsm", &trsm_metal, "Triangular Solve (TRSM)");
+    m.def("geqr2", &geqr2_metal, "Panel Householder QR");
+    m.def("larfb", &larfb_metal, "Apply Block Reflector");
+    m.def("larft", &larft_metal, "Form T Matrix");
+    m.def("qr", &qr_fused_metal, "Fused QR");
+    m.def("qr_blocked", &qr_metal, "Blocked QR");
+    m.def("qr_batched", &qr_batched_metal, "Batched QR");
+    m.def("trsm_batched", &trsm_batched_metal, "Batched TRSM");
+    m.def("cholesky_batched", &cholesky_batched_metal, "Batched Cholesky");
+    m.def("cholesky_solve_batched", &cholesky_solve_batched_metal, "Batched Cholesky Solve");
+    
+    // Training ops
+    m.def("rmsnorm_fwd", &rmsnorm_fwd_metal, "RMSNorm Forward");
+    m.def("rmsnorm_bwd", &rmsnorm_bwd_metal, "RMSNorm Backward");
+    m.def("adamw_step", &adamw_step_metal, "AdamW Step");
+    
+    // Activations
+    m.def("gelu_fwd", &gelu_fwd_metal, "GELU Forward");
+    m.def("gelu_bwd", &gelu_bwd_metal, "GELU Backward");
+    m.def("silu_fwd", &silu_fwd_metal, "SiLU Forward");
+    m.def("silu_bwd", &silu_bwd_metal, "SiLU Backward");
+    
+    // SDPA
+    m.def("sdpa_fwd", &sdpa_fwd_metal, "Scaled Dot Product Attention Forward");
+    m.def("sdpa_bwd", &sdpa_bwd_metal, "Scaled Dot Product Attention Backward");
+}
+

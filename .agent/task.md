@@ -16,20 +16,23 @@
 - [x] TRSM (triangular solve)
 - [x] Solve (QR-based batched)
 
-### High-Impact Kernels ✅
-- [x] LU decomposition (with pivoting)
-- [x] SYRK (A.T @ A)
-- [x] Frobenius norm
-- [x] Softmax (numerically stable)
-- [x] Trace
+### Training Ops ✅ (v0.1.5)
+- [x] RMSNorm (2.5x faster, vectorized SIMD)
+- [x] AdamW (2.9x faster, fused single-kernel)
+- [x] GELU/SiLU (4x faster, float4 vectorized)
+- [x] SDPA (Flash Attention v2, tiled, causal masking)
+- [x] SDPA Backward (Metal kernel + autograd)
 
 ### Benchmarking ✅
 - [x] Unified benchmark.py with all operations
-- [x] --compare flag for historical comparison
+- [x] --activations, --sdpa, --training flags
 - [x] Runtime tracking saved to benchmark_history.jsonl
 
+## Current Version
+- metalcore v0.1.5
+- Tested on Python 3.9, 3.10, 3.11, 3.12, 3.13
+
 ## Future Work
-- [ ] Publish metalcore to PyPI
-- [ ] Deprecate metalsvd on PyPI (yank 0.0.3)
 - [ ] Complex number support
 - [ ] Additional BLAS Level 3 operations
+- [ ] Optimize SDPA to match PyTorch's native performance

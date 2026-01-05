@@ -1,32 +1,39 @@
 # Performance & Benchmarks
 
-## Benchmark Results (metalcore consolidated)
+## Benchmark Commands
+```bash
+python benchmark.py --quick          # All benchmarks
+python benchmark.py --training       # RMSNorm + AdamW
+python benchmark.py --activations    # GELU + SiLU
+python benchmark.py --sdpa           # Scaled Dot Product Attention
+```
 
-Run with: `python benchmark.py --quick`
+## Training Ops (v0.1.5)
 
-### Best GPU Speedups
+| Operation | Size | Metal vs Torch | Status |
+|-----------|------|----------------|--------|
+| RMSNorm | 4096×4096 | **2.5x faster** | 💚 |
+| AdamW | 16M params | **2.9x faster** | 💚 |
+| SiLU | 256×1024 | **4x faster** | 💚 |
+| GELU | 1024×4096 | ~1x (parity) | ⚪ |
+| SDPA | N=256 | 14x slower | 🔴 |
+
+**Note**: SDPA is slower than PyTorch's native implementation (which uses Apple's MPS optimizations). Use `enable_metal_sdpa()` only if you need custom backward pass behavior.
+
+## Linear Algebra Ops
 
 | Operation | Size | GPU vs CPU |
 |-----------|------|------------|
-| **Gemma-7B MLP SVD** | 3072×24576 | **25x** (0.04x ratio) |
-| **Cholesky batched** | 500×16×16 | **33x** (0.03x ratio) |
-| **QR batched** | 1000×16×16 | **14x** (0.07x ratio) |
-| **Llama-3-8B SVD** | 4096×14336 | **5.9x** (0.17x ratio) |
+| **Gemma-7B MLP SVD** | 3072×24576 | **25x faster** |
+| **Cholesky batched** | 500×16×16 | **33x faster** |
+| **QR batched** | 1000×16×16 | **14x faster** |
+| **Llama-3-8B SVD** | 4096×14336 | **5.9x faster** |
 
-### Where GPU Wins
-- Batched operations (QR, Cholesky, SVD, Eigh)
-- Large tall matrices (M >> N)
-- LLM weight matrices
+## When to Use Metal
 
-### Where CPU Wins  
-- Small single matrices (N < 64)
-- Sequential dependencies (single QR)
-- Small batch solve (overhead dominates)
-
-## Benchmark Comparison
-Use `--compare` flag to see delta from previous run:
-```bash
-python benchmark.py --quick --compare
-```
-
-Results saved to `benchmark_history.jsonl` with runtime tracking.
+| ✅ Use Metal | ❌ Use CPU/Native |
+|--------------|-------------------|
+| Batched QR/Cholesky/SVD | Single small matrices |
+| Large LLM weight matrices | SDPA (use native F.sdpa) |
+| RMSNorm in training | Sequential operations |
+| AdamW optimizer step | Small batch operations |

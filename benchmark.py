@@ -31,6 +31,11 @@ parser.add_argument("--eigh", action="store_true", help="Run only eigenvalue ben
 parser.add_argument("--cholesky", action="store_true", help="Run only Cholesky benchmarks")
 parser.add_argument("--solve", action="store_true", help="Run only solve benchmarks")
 parser.add_argument("--models", action="store_true", help="Run only LLM model benchmarks")
+parser.add_argument("--rmsnorm", action="store_true", help="Run only RMSNorm benchmarks")
+parser.add_argument("--adamw", action="store_true", help="Run only AdamW benchmarks")
+parser.add_argument("--training", action="store_true", help="Run only training benchmarks (RMSNorm + AdamW)")
+parser.add_argument("--activations", action="store_true", help="Run only activation benchmarks (GELU/SiLU)")
+parser.add_argument("--sdpa", action="store_true", help="Run only SDPA benchmarks")
 parser.add_argument("--pipeline", action="store_true", help="Run only pipeline benchmarks")
 parser.add_argument("--compare", action="store_true", help="Compare results with previous run")
 args = parser.parse_args()
@@ -40,18 +45,22 @@ LITE_MODE = args.lite  # Quick validation: 1 iter, minimal configs, no file writ
 QUICK_MODE = args.quick or args.lite  # Fewer iterations
 
 # Test selection (if none specified, run all)
-RUN_ALL = not any([args.svd, args.qr, args.eigh, args.cholesky, args.solve, args.models, args.pipeline])
+RUN_ALL = not any([args.svd, args.qr, args.eigh, args.cholesky, args.solve, args.models, args.pipeline, args.rmsnorm, args.adamw, args.training, args.activations, args.sdpa])
 RUN_SVD = args.svd or RUN_ALL
 RUN_QR = args.qr or RUN_ALL
 RUN_EIGH = args.eigh or RUN_ALL
 RUN_CHOLESKY = args.cholesky or RUN_ALL
 RUN_SOLVE = args.solve or RUN_ALL
+RUN_RMSNORM = args.rmsnorm or args.training or RUN_ALL
+RUN_ADAMW = args.adamw or args.training or RUN_ALL
+RUN_ACTIVATIONS = args.activations or RUN_ALL
+RUN_SDPA = args.sdpa or RUN_ALL
 RUN_MODELS = args.models or (RUN_ALL and not LITE_MODE)  # Skip models in lite
 RUN_PIPELINE = args.pipeline or (RUN_ALL and not LITE_MODE)  # Skip pipeline in lite
 
-# Add package paths
+# Add package paths (metalcore uses installed package for full functionality)
 sys.path.insert(0, str(Path(__file__).parent / "packages/metalsvd/src"))
-sys.path.insert(0, str(Path(__file__).parent / "packages/metalcore/src"))
+# sys.path.insert(0, str(Path(__file__).parent / "packages/metalcore/src"))  # Use installed metalcore
 sys.path.insert(0, str(Path(__file__).parent / "packages/metaleig/src"))
 
 device = 'mps'
@@ -843,6 +852,386 @@ def benchmark_models():
     return all_results
 
 
+def benchmark_rmsnorm():
+    """Benchmark RMSNorm operations."""
+    print("Benchmarking RMSNorm...")
+    results = []
+    
+    try:
+        from metalcore.rmsnorm import MetalRMSNorm
+        import torch
+    except ImportError:
+        print("  metalcore.rmsnorm not available, skipping")
+        return results
+
+    configs = [
+        (32, 4096),
+        (1, 4096), 
+        (1024, 1024),
+        (4096, 4096)
+    ]
+    if LITE_MODE:
+        configs = [(32, 4096)]
+        
+    for B, N in configs:
+        if QUICK_MODE and B > 500: continue
+        
+        name = f"RMSNorm ({B}x{N})"
+        print(f"  Running {name}...")
+        
+        iters = 1 if LITE_MODE else (100 if QUICK_MODE else 1000)
+        warmup = 1 if LITE_MODE else 10
+        
+        x = torch.randn(B, N, device=device, dtype=torch.float32, requires_grad=True)
+        dy = torch.randn(B, N, device=device, dtype=torch.float32)
+        
+        model_metal = MetalRMSNorm(N).to(device)
+        model_torch = torch.nn.RMSNorm(N).to(device)
+        
+        # Function to time Metal
+        def run_metal():
+            y = model_metal(x)
+            y.backward(dy, retain_graph=True)
+            if device == 'mps': torch.mps.synchronize()
+            
+        # Function to time Torch
+        def run_torch():
+            y = model_torch(x)
+            y.backward(dy, retain_graph=True)
+            if device == 'mps': torch.mps.synchronize()
+            
+        # Warmup
+        for _ in range(warmup):
+            run_metal()
+            run_torch()
+            
+        # Benchmark Metal
+        start = time.time()
+        for _ in range(iters):
+            run_metal()
+        metal_time = (time.time() - start) / iters * 1000 # ms
+        
+        # Benchmark Torch
+        start = time.time()
+        for _ in range(iters):
+            run_torch()
+        torch_time = (time.time() - start) / iters * 1000 # ms
+        
+        ratio = metal_time / torch_time
+        status = color_ratio(ratio)
+        
+        results.append([
+            f"{B}x{N}", "Fwd+Bwd",
+            format_time(metal_time), format_time(torch_time),
+            f"{ratio:.2f}x", status
+        ])
+        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
+def benchmark_adamw():
+    """Benchmark AdamW optimizer step."""
+    print("Benchmarking AdamW...")
+    results = []
+    
+    try:
+        from metalcore.optim import MetalAdamW
+        import torch
+    except ImportError:
+        print("  metalcore.optim not available, skipping")
+        return results
+
+    configs = [
+        (1024*1024, "1M Params"),
+        (10*1024*1024, "10M Params"),
+        (4096*4096, "16M Params")
+    ]
+    if LITE_MODE:
+        configs = [(1024*1024, "1M Params")]
+    
+    for N, label in configs:
+        if QUICK_MODE and N > 5*1024*1024: continue
+        
+        name = f"AdamW ({label})"
+        print(f"  Running {name}...")
+        
+        iters = 1 if LITE_MODE else (50 if QUICK_MODE else 100)
+        warmup = 1 if LITE_MODE else 5
+        
+        p = torch.randn(N, device=device)
+        g = torch.randn(N, device=device)
+        
+        p_metal = p.clone()
+        p_metal.grad = g.clone()
+        opt_metal = MetalAdamW([p_metal], lr=1e-3)
+        
+        p_torch = p.clone()
+        p_torch.grad = g.clone()
+        opt_torch = torch.optim.AdamW([p_torch], lr=1e-3)
+        
+        def run_metal():
+            opt_metal.step()
+            if device == 'mps': torch.mps.synchronize()
+            
+        def run_torch():
+            opt_torch.step()
+            if device == 'mps': torch.mps.synchronize()
+            
+        # Warmup
+        for _ in range(warmup):
+            run_metal()
+            run_torch()
+            
+        # Benchmark Metal
+        start = time.time()
+        for _ in range(iters):
+            run_metal()
+        metal_time = (time.time() - start) / iters * 1000
+        
+        # Benchmark Torch
+        start = time.time()
+        for _ in range(iters):
+            run_torch()
+        torch_time = (time.time() - start) / iters * 1000
+        
+        ratio = metal_time / torch_time
+        status = color_ratio(ratio)
+        
+        results.append([
+            label, f"N={N}",
+            format_time(metal_time), format_time(torch_time),
+            f"{ratio:.2f}x", status
+        ])
+        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
+def benchmark_activations():
+    """Benchmark GELU and SiLU activation functions."""
+    print("Benchmarking Activations (GELU/SiLU)...")
+    results = []
+    
+    try:
+        from metalcore import metal_gelu, metal_silu
+        import torch.nn.functional as F
+    except ImportError:
+        print("  metalcore activations not available, skipping")
+        return results
+
+    configs = [
+        ((256, 1024), "Small (256x1024)"),
+        ((1024, 4096), "Medium (1024x4096)"),
+        ((4096, 4096), "Large (4096x4096)"),
+    ]
+    if LITE_MODE:
+        configs = [((256, 1024), "Small (256x1024)")]
+    
+    iters = 1 if LITE_MODE else (50 if QUICK_MODE else 100)
+    warmup = 1 if LITE_MODE else 5
+    
+    for shape, label in configs:
+        if QUICK_MODE and shape[0] > 2048: continue
+        
+        x = torch.randn(*shape, device=device, dtype=torch.float32)
+        
+        # GELU benchmark
+        name = f"GELU {label}"
+        print(f"  Running {name}...")
+        
+        def run_metal_gelu():
+            y = metal_gelu(x)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+            
+        def run_torch_gelu():
+            y = F.gelu(x, approximate='tanh')
+            if device == 'mps': torch.mps.synchronize()
+            return y
+        
+        for _ in range(warmup):
+            run_metal_gelu()
+            run_torch_gelu()
+        
+        start = time.time()
+        for _ in range(iters):
+            run_metal_gelu()
+        metal_time = (time.time() - start) / iters * 1000
+        
+        start = time.time()
+        for _ in range(iters):
+            run_torch_gelu()
+        torch_time = (time.time() - start) / iters * 1000
+        
+        ratio = metal_time / torch_time
+        status = color_ratio(ratio)
+        results.append([
+            f"GELU {label}", f"{shape[0]}x{shape[1]}",
+            format_time(metal_time), format_time(torch_time),
+            f"{ratio:.2f}x", status
+        ])
+        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+        # SiLU benchmark
+        name = f"SiLU {label}"
+        print(f"  Running {name}...")
+        
+        def run_metal_silu():
+            y = metal_silu(x)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+            
+        def run_torch_silu():
+            y = F.silu(x)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+        
+        for _ in range(warmup):
+            run_metal_silu()
+            run_torch_silu()
+        
+        start = time.time()
+        for _ in range(iters):
+            run_metal_silu()
+        metal_time = (time.time() - start) / iters * 1000
+        
+        start = time.time()
+        for _ in range(iters):
+            run_torch_silu()
+        torch_time = (time.time() - start) / iters * 1000
+        
+        ratio = metal_time / torch_time
+        status = color_ratio(ratio)
+        results.append([
+            f"SiLU {label}", f"{shape[0]}x{shape[1]}",
+            format_time(metal_time), format_time(torch_time),
+            f"{ratio:.2f}x", status
+        ])
+        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
+def benchmark_sdpa():
+    """Benchmark Scaled Dot Product Attention."""
+    print("Benchmarking SDPA (Scaled Dot Product Attention)...")
+    results = []
+    
+    try:
+        from metalcore import metal_scaled_dot_product_attention
+        import torch.nn.functional as F
+    except ImportError:
+        print("  metalcore SDPA not available, skipping")
+        return results
+
+    configs = [
+        ((2, 8, 64, 64), "Small (B=2, H=8, N=64, D=64)"),
+        ((2, 8, 256, 64), "Medium (B=2, H=8, N=256, D=64)"),
+        ((1, 8, 512, 64), "Large (B=1, H=8, N=512, D=64)"),
+    ]
+    if LITE_MODE:
+        configs = [((2, 8, 64, 64), "Small (B=2, H=8, N=64, D=64)")]
+    
+    iters = 1 if LITE_MODE else (20 if QUICK_MODE else 50)
+    warmup = 1 if LITE_MODE else 3
+    
+    for shape, label in configs:
+        B, H, N, D = shape
+        if QUICK_MODE and N > 256: continue
+        
+        Q = torch.randn(B, H, N, D, device=device, dtype=torch.float32)
+        K = torch.randn(B, H, N, D, device=device, dtype=torch.float32)
+        V = torch.randn(B, H, N, D, device=device, dtype=torch.float32)
+        
+        # Non-causal SDPA
+        name = f"SDPA {label}"
+        print(f"  Running {name}...")
+        
+        def run_metal_sdpa():
+            y = metal_scaled_dot_product_attention(Q, K, V, is_causal=False)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+            
+        def run_torch_sdpa():
+            y = F.scaled_dot_product_attention(Q, K, V, is_causal=False)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+        
+        for _ in range(warmup):
+            run_metal_sdpa()
+            run_torch_sdpa()
+        
+        start = time.time()
+        for _ in range(iters):
+            run_metal_sdpa()
+        metal_time = (time.time() - start) / iters * 1000
+        
+        start = time.time()
+        for _ in range(iters):
+            run_torch_sdpa()
+        torch_time = (time.time() - start) / iters * 1000
+        
+        ratio = metal_time / torch_time
+        status = color_ratio(ratio)
+        
+        # Accuracy check
+        O_metal = run_metal_sdpa()
+        O_torch = run_torch_sdpa()
+        max_err = (O_metal - O_torch).abs().max().item()
+        
+        results.append([
+            label, f"B={B}, H={H}, N={N}, D={D}",
+            format_time(metal_time), format_time(torch_time),
+            f"{ratio:.2f}x", status, format_accuracy(max_err)
+        ])
+        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+        # Causal SDPA
+        name = f"SDPA Causal {label}"
+        print(f"  Running {name}...")
+        
+        def run_metal_sdpa_causal():
+            y = metal_scaled_dot_product_attention(Q, K, V, is_causal=True)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+            
+        def run_torch_sdpa_causal():
+            y = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+            if device == 'mps': torch.mps.synchronize()
+            return y
+        
+        for _ in range(warmup):
+            run_metal_sdpa_causal()
+            run_torch_sdpa_causal()
+        
+        start = time.time()
+        for _ in range(iters):
+            run_metal_sdpa_causal()
+        metal_time = (time.time() - start) / iters * 1000
+        
+        start = time.time()
+        for _ in range(iters):
+            run_torch_sdpa_causal()
+        torch_time = (time.time() - start) / iters * 1000
+        
+        ratio = metal_time / torch_time
+        status = color_ratio(ratio)
+        
+        # Accuracy check
+        O_metal = run_metal_sdpa_causal()
+        O_torch = run_torch_sdpa_causal()
+        max_err = (O_metal - O_torch).abs().max().item()
+        
+        results.append([
+            f"{label} (causal)", f"B={B}, H={H}, N={N}, D={D}",
+            format_time(metal_time), format_time(torch_time),
+            f"{ratio:.2f}x", status, format_accuracy(max_err)
+        ])
+        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
 def benchmark_pipeline():
     """Benchmark chained operations - GPU advantage when data stays on device."""
     print("Benchmarking Pipeline Operations...")
@@ -1105,6 +1494,54 @@ def main():
                 eigh_results
             )
     
+    # RMSNorm benchmarks
+    rmsnorm_results = []
+    if RUN_RMSNORM:
+        rmsnorm_results = benchmark_rmsnorm()
+        if rmsnorm_results:
+            results.add_section(
+                "RMSNorm (metalcore) ⭐ GPU WINS",
+                "Fused RMSNorm kernel vs torch.nn.RMSNorm",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status"],
+                rmsnorm_results
+            )
+            
+    # AdamW benchmarks
+    adamw_results = []
+    if RUN_ADAMW:
+        adamw_results = benchmark_adamw()
+        if adamw_results:
+            results.add_section(
+                "AdamW (metalcore) ⭐ GPU WINS",
+                "Fused AdamW optimizer step vs torch.optim.AdamW",
+                ["Params", "Size", "Metal", "CPU", "Ratio", "Status"],
+                adamw_results
+            )
+
+    # Activations benchmarks
+    activations_results = []
+    if RUN_ACTIVATIONS:
+        activations_results = benchmark_activations()
+        if activations_results:
+            results.add_section(
+                "Activations (metalcore)",
+                "GELU/SiLU activations with float4 vectorization",
+                ["Op", "Shape", "Metal", "Torch", "Ratio", "Status"],
+                activations_results
+            )
+    
+    # SDPA benchmarks
+    sdpa_results = []
+    if RUN_SDPA:
+        sdpa_results = benchmark_sdpa()
+        if sdpa_results:
+            results.add_section(
+                "SDPA (metalcore)",
+                "Scaled Dot Product Attention with Flash Attention v2 tiling",
+                ["Config", "Shape", "Metal", "Torch", "Ratio", "Status", "Error"],
+                sdpa_results
+            )
+
     # Pipeline benchmarks
     pipeline_results = []
     if RUN_PIPELINE:
@@ -1156,8 +1593,11 @@ def main():
             "qr_single": qr_single_results,
             "qr_batched": qr_batched_results,
             "eigh": eigh_results,
+            "eigh": eigh_results,
             "cholesky": cholesky_results,
             "solve": solve_results,
+            "rmsnorm": rmsnorm_results,
+            "adamw": adamw_results,
             "models": model_results,
         }
         

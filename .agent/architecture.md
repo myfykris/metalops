@@ -1,45 +1,50 @@
 # System Architecture
 
 ## Overview
-`metalcore` provides high-performance linear algebra operations for PyTorch on macOS by bypassing generic MPS fallbacks and executing custom Metal kernels. It consolidates SVD, Eigh, QR, Cholesky, and other LA operations into a single native backend.
+`metalcore` provides high-performance linear algebra and training operations for PyTorch on macOS by bypassing generic MPS fallbacks and executing custom Metal kernels.
 
 ## Package Structure
 ```
 packages/metalcore/
 ├── native/
-│   ├── core_kernels.metal   # All Metal kernels (3,200+ lines)
-│   └── core_mps.mm          # C++ dispatch + PYBIND11
+│   ├── core_kernels.metal       # Core LA kernels
+│   ├── training_kernels.metal   # RMSNorm, AdamW
+│   ├── activation_kernels.metal # GELU, SiLU
+│   ├── sdpa_kernels.metal       # Flash Attention v2
+│   └── core_mps.mm              # C++ dispatch + PYBIND11
 └── src/metalcore/
-    ├── __init__.py          # Public API
-    ├── svd.py               # SVD with De Rijk optimization
-    ├── eigh.py              # Eigendecomposition
-    ├── qr.py                # QR decomposition
-    ├── cholesky.py          # Cholesky factorization
-    ├── solve.py             # Linear system solve
-    ├── pinv.py              # Pseudo-inverse
-    └── lstsq.py             # Least squares
+    ├── __init__.py      # Public API + enable_metal_sdpa()
+    ├── svd.py           # SVD with De Rijk optimization
+    ├── qr.py            # QR decomposition
+    ├── cholesky.py      # Cholesky factorization
+    ├── rmsnorm.py       # MetalRMSNorm module
+    ├── optim.py         # MetalAdamW optimizer
+    ├── activations.py   # metal_gelu, metal_silu
+    └── sdpa.py          # Flash Attention v2
 ```
 
 ## Components
 
-### 1. Metal Kernels (`native/core_kernels.metal`)
-- **Jacobi SVD**: One-sided Jacobi with SIMD reduction
-- **Jacobi Eigh**: Symmetric eigenvalue decomposition
-- **Householder QR**: Batched QR with apply kernels
-- **MAGMA-style Cholesky**: Shared memory optimized
-- **High-impact ops**: LU, SYRK, FrobNorm, Softmax, Trace
+### 1. Metal Kernels
+| File | Kernels |
+|------|---------|
+| `core_kernels.metal` | SVD, QR, Cholesky, Eigh, TRSM |
+| `training_kernels.metal` | rmsnorm_fwd/bwd, adamw_step |
+| `activation_kernels.metal` | gelu_fwd/bwd, silu_fwd/bwd (float4 vectorized) |
+| `sdpa_kernels.metal` | flash_attention_fwd_v2/bwd_v2, attention_naive |
 
-### 2. Host Orchestrator (`native/core_mps.mm`)
+### 2. Host Orchestrator (`core_mps.mm`)
 - **Objective-C++**: Bridges PyTorch (C++) and Metal (Obj-C)
-- **PSO Management**: Pipeline state objects for each kernel
+- **PSO Management**: Pipeline state objects (19 kernels)
 - **PYBIND11**: Python bindings for all operations
 
-### 3. Python Wrappers (`src/metalcore/*.py`)
-- **Autograd**: Custom backward passes where needed
-- **Shape handling**: Wide/tall matrix transpositions
-- **Config**: Strategy selection, optimization flags
+### 3. Python Wrappers
+- **Autograd**: Custom backward passes (GELU, SiLU, SDPA)
+- **MetalRMSNorm**: `nn.Module` replacement for `torch.nn.RMSNorm`
+- **MetalAdamW**: Drop-in replacement for `torch.optim.AdamW`
 
 ## Design Decisions
-- **External Metal Source**: Loaded at runtime for hot-reload development
-- **Unified Package**: All LA ops in one native extension (vs separate packages)
-- **Batched First**: Most kernels optimized for batch dimension parallelism
+- **Compiled .metallib**: Precompiled for faster load times
+- **Unified Package**: All ops in one native extension
+- **Batched First**: Kernels optimized for batch parallelism
+- **SDPA Opt-in**: Requires explicit `enable_metal_sdpa()` call

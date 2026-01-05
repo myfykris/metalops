@@ -10,18 +10,28 @@ class CustomBuildExtension(BuildExtension):
         print("Compiling Metal kernels...")
         # Path relative to setup.py
         nx = os.path.join("src", "metalcore", "native")
-        src = os.path.join(nx, "core_kernels.metal")
-        air = os.path.join(nx, "core_kernels.air")
         lib = os.path.join(nx, "core_kernels.metallib")
         
-        # Check if metal compiler is available
+        # Find all .metal files
+        metal_files = [f for f in os.listdir(nx) if f.endswith('.metal')]
+        air_files = []
+        
         try:
-            subprocess.check_call(['xcrun', '-sdk', 'macosx', 'metal', '-c', src, '-o', air])
-            subprocess.check_call(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib])
-            # Clean up intermediate air file
-            if os.path.exists(air):
-                os.remove(air)
-            print("Successfully compiled core_kernels.metallib")
+            # Compile each .metal to .air
+            for metal_file in metal_files:
+                src_path = os.path.join(nx, metal_file)
+                air_path = os.path.join(nx, metal_file.replace('.metal', '.air'))
+                subprocess.check_call(['xcrun', '-sdk', 'macosx', 'metal', '-c', src_path, '-o', air_path])
+                air_files.append(air_path)
+            
+            # Link all .air to single .metallib
+            subprocess.check_call(['xcrun', '-sdk', 'macosx', 'metallib'] + air_files + ['-o', lib])
+            
+            # Clean up intermediate air files
+            for air in air_files:
+                if os.path.exists(air):
+                    os.remove(air)
+            print(f"Successfully compiled {len(metal_files)} metal files to core_kernels.metallib")
         except Exception as e:
             print(f"WARNING: Metal compilation failed: {e}")
             print("Will rely on runtime compilation if .metal source is present.")
