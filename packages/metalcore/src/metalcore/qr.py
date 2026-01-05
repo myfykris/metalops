@@ -59,7 +59,8 @@ def qr(A, mode='reduced'):
         result = torch.linalg.qr(A_cpu, mode=mode)
         
         if mode == 'r':
-            return result.to(A.device)
+            _, R = result
+            return R.to(A.device)
         else:
             Q, R = result
             return Q.to(A.device), R.to(A.device)

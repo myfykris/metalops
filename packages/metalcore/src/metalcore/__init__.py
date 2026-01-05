@@ -17,7 +17,7 @@ This package provides GPU-accelerated building blocks for linear algebra:
 
 from .trsm import trsm, trsm_batched
 from .householder import householder_vector, apply_householder
-from .qr import qr
+from .qr import qr, qr_solve
 from .lstsq import lstsq
 from .pinv import pinv
 from .solve import solve
@@ -43,6 +43,7 @@ __all__ = [
     "householder_vector",
     "apply_householder",
     "qr",
+    "qr_solve",
     "lstsq",
     "pinv",
     "solve",

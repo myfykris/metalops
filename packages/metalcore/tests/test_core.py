@@ -248,7 +248,7 @@ def run_all_tests():
         test_householder_basic,
         test_householder_zero_vector,
         test_householder_already_e1,
-        # test_qr_solve_basic,  # Skip QR solve for now
+        test_qr_solve_basic,
     ]
     
     passed = 0
