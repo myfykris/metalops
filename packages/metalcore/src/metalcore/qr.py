@@ -1,18 +1,24 @@
 """
 QR Decomposition using Blocked Householder Algorithm.
 
-Algorithm:
-    for each block of columns:
-        1. Factor panel: A[:, j:j+bs] = Q_panel @ R_panel (sequential Householder)
-        2. Form WY representation: Q_panel = I - V @ T @ V.T
-        3. Apply to trailing matrix: A[:, j+bs:] = Q_panel.T @ A[:, j+bs:] (big matmul!)
+Based on ROCm/rocSOLVER patterns:
+1. For small matrices: Use unblocked algorithm (BLAS-2)
+2. For large matrices: 
+   - Factor panel with unblocked Householder (geqr2)
+   - Build T matrix for WY representation (larft)
+   - Apply block reflector to trailing matrix (larfb) - BIG GEMM!
 
-The key insight is that step 3 is a large matrix multiplication that dominates
-runtime for big matrices, making this algorithm GPU-friendly.
+The key insight is that larfb converts O(nb) rank-1 updates into
+two large matrix multiplications, which is where GPU shines.
 """
 
 import torch
-from .householder import householder_vector, apply_householder_wy
+from . import config
+
+
+# Threshold for switching between blocked and unblocked
+QR_BLOCKSIZE = 32
+QR_SWITCH_SIZE = 64
 
 
 def qr(A, mode='reduced'):
@@ -33,131 +39,308 @@ def qr(A, mode='reduced'):
     Returns:
         Q: Orthogonal matrix (if mode != 'r')
         R: Upper triangular matrix
+        
+    Note:
+        For single matrices, CPU is used (LAPACK is 3-50x faster).
+        For batched matrices, use qr_batched() from metalcore_backend.
     """
     if A.device.type != 'mps':
-        # Use PyTorch implementation
         return torch.linalg.qr(A, mode=mode)
     
-    # Handle batched case
     if A.dim() > 2:
         return _qr_batched(A, mode)
     
+    # SMART FALLBACK: For single matrices, CPU always wins
+    # due to sequential column dependencies in Householder QR.
+    # CPU LAPACK achieves 3-50x faster performance than GPU.
+    # Can be disabled via config.ENABLE_CPU_FALLBACK = False
+    if config.ENABLE_CPU_FALLBACK:
+        A_cpu = A.cpu()
+        result = torch.linalg.qr(A_cpu, mode=mode)
+        
+        if mode == 'r':
+            return result.to(A.device)
+        else:
+            Q, R = result
+            return Q.to(A.device), R.to(A.device)
+    
+    # Fallback disabled - use GPU implementation
+    M, N = A.shape
+    if M <= QR_SWITCH_SIZE or N <= QR_SWITCH_SIZE:
+        return _qr_unblocked(A, mode)
     return _qr_blocked(A, mode)
 
 
-def _qr_blocked(A, mode='reduced', block_size=32):
+def _geqr2(A):
     """
-    Blocked Householder QR decomposition.
+    Unblocked Householder QR (panel factorization).
     
-    This is the main algorithm optimized for GPU.
+    Computes QR of A in-place, storing Householder vectors below diagonal
+    and R on/above diagonal. Returns tau values.
+    
+    This is LAPACK's geqr2: sequential Householder for each column.
     """
     device = A.device
     dtype = A.dtype
     M, N = A.shape
     K = min(M, N)
     
-    # Work on a copy
+    R = A.clone()
+    taus = torch.zeros(K, device=device, dtype=dtype)
+    
+    for k in range(K):
+        # Get column k below diagonal
+        x = R[k:, k].clone()
+        
+        # Compute Householder vector
+        norm_x = torch.norm(x)
+        if norm_x < 1e-10:
+            taus[k] = 0.0
+            continue
+        
+        sign = 1.0 if x[0] >= 0 else -1.0
+        
+        # v = x + sign * norm_x * e_1
+        v = x.clone()
+        v[0] = x[0] + sign * norm_x
+        
+        # tau = 2 / (v^T v / v[0]^2) = 2 * v[0]^2 / ||v||^2
+        v_normsq = torch.dot(v, v)
+        tau = 2.0 * v[0]**2 / v_normsq
+        
+        # Normalize v so v[0] = 1
+        v = v / v[0]
+        taus[k] = tau
+        
+        # Apply H to trailing matrix: R[k:, k:] = H @ R[k:, k:]
+        # H @ R = R - tau * v @ (v^T @ R)
+        trailing = R[k:, k:]
+        vT_R = v @ trailing  # (N-k,) - this is a reduction
+        R[k:, k:] = trailing - tau * torch.outer(v, vT_R)
+        
+        # Store v below diagonal (for later reconstruction of Q)
+        R[k+1:, k] = v[1:]
+    
+    return R, taus
+
+
+def _larft(V, tau):
+    """
+    Form the triangular factor T of a block reflector H = I - V @ T @ V^T.
+    
+    This is LAPACK's larft: builds the T matrix for WY representation.
+    
+    Args:
+        V: Matrix (M, K) with Householder vectors as columns (v_i stored below diagonal)
+           V[i, i] is implicitly 1
+        tau: Householder scalars (K,)
+        
+    Returns:
+        T: Upper triangular matrix (K, K)
+    """
+    device = V.device
+    dtype = V.dtype
+    M, K = V.shape
+    
+    T = torch.zeros(K, K, device=device, dtype=dtype)
+    
+    for i in range(K):
+        T[i, i] = tau[i]
+        
+        if i > 0:
+            # T[0:i, i] = -tau[i] * T[0:i, 0:i] @ V[:, 0:i]^T @ V[:, i]
+            # Build V column properly (v[j] = 1 at position j)
+            v_i = V[:, i].clone()
+            v_i[i] = 1.0  # Implicit 1 on diagonal
+            
+            V_prev = V[:, :i].clone()
+            for j in range(i):
+                V_prev[j, j] = 1.0  # Implicit 1s
+            
+            VT_vi = V_prev.T @ v_i  # (i,)
+            T[:i, i] = -tau[i] * (T[:i, :i] @ VT_vi)
+    
+    return T
+
+
+def _larfb(C, V, T, side='left', trans=True):
+    """
+    Apply block Householder reflector to a matrix.
+    
+    This is LAPACK's larfb: the performance-critical operation.
+    
+    If side='left' and trans=True:
+        C = H^T @ C = (I - V @ T^T @ V^T) @ C = C - V @ (T^T @ (V^T @ C))
+    
+    This is TWO matrix multiplications - GPU efficient!
+    
+    Args:
+        C: Matrix (M, N) to transform
+        V: Householder vectors (M, K) - stored below diagonal, implicit 1 on diagonal
+        T: Triangular factor (K, K)
+        side: 'left' or 'right'
+        trans: If True, apply H^T; if False, apply H
+        
+    Returns:
+        Transformed C
+    """
+    device = C.device
+    dtype = C.dtype
+    M, N = C.shape
+    _, K = V.shape
+    
+    # Build proper V with implicit 1s on diagonal
+    V_full = V.clone()
+    for i in range(K):
+        V_full[i, i] = 1.0
+    
+    if side == 'left':
+        if trans:
+            # C = C - V @ T^T @ V^T @ C
+            # Step 1: W = V^T @ C  (K x N) - matmul
+            W = torch.matmul(V_full.T, C)
+            # Step 2: W = T^T @ W  (K x N) - triangular matmul
+            W = torch.matmul(T.T, W)
+            # Step 3: C = C - V @ W  (M x N) - matmul
+            C = C - torch.matmul(V_full, W)
+        else:
+            # C = C - V @ T @ V^T @ C
+            W = torch.matmul(V_full.T, C)
+            W = torch.matmul(T, W)
+            C = C - torch.matmul(V_full, W)
+    else:  # side == 'right'
+        if trans:
+            # C = C @ H^T = C - C @ V @ T^T @ V^T
+            W = torch.matmul(C, V_full)  # (M x K)
+            W = torch.matmul(W, T.T)
+            C = C - torch.matmul(W, V_full.T)
+        else:
+            W = torch.matmul(C, V_full)
+            W = torch.matmul(W, T)
+            C = C - torch.matmul(W, V_full.T)
+    
+    return C
+
+
+def _qr_blocked(A, mode='reduced'):
+    """
+    Blocked Householder QR decomposition.
+    
+    Algorithm (follows rocSOLVER pattern):
+        for each block of columns:
+            1. Factor panel with geqr2 (unblocked)
+            2. Build T matrix with larft
+            3. Apply block reflector with larfb (big GEMM!)
+    """
+    device = A.device
+    dtype = A.dtype
+    M, N = A.shape
+    K = min(M, N)
+    nb = QR_BLOCKSIZE
+    
     R = A.clone()
     
-    # Storage for Householder vectors (for forming Q later)
+    # Storage for V and tau to reconstruct Q later
     V_storage = []
-    tau_storage = []
+    T_storage = []
     
-    for j in range(0, K, block_size):
-        # Determine block size
-        bs = min(block_size, K - j)
+    j = 0
+    while j < K:
+        jb = min(nb, K - j)  # Block size
         
-        # Factor the panel A[j:, j:j+bs] using sequential Householder
-        V_panel = torch.zeros(M - j, bs, device=device, dtype=dtype)
-        tau_panel = torch.zeros(bs, device=device, dtype=dtype)
+        # Factor panel A[j:, j:j+jb] using unblocked algorithm
+        panel = R[j:, j:j+jb].clone()
+        panel_R, panel_tau = _geqr2(panel)
         
-        for k in range(bs):
-            col = j + k
-            
-            # Compute Householder vector for column col
-            x = R[col:, col].clone()
-            
-            # Compute norm and sign
-            norm_x = torch.norm(x)
-            if norm_x < 1e-10:
-                V_panel[k:, k] = x
-                V_panel[k, k] = 1.0
-                tau_panel[k] = 0.0
-                continue
-            
-            sign = 1.0 if x[0] >= 0 else -1.0
-            
-            # v = x + sign * norm_x * e_1
-            v = x.clone()
-            v[0] = x[0] + sign * norm_x
-            
-            # tau = 2 * v[0]^2 / ||v||^2
-            v_normsq = torch.dot(v, v)
-            tau = 2.0 * v[0]**2 / v_normsq
-            
-            # Normalize v so v[0] = 1
-            v = v / v[0]
-            
-            # Store v and tau
-            V_panel[k:, k] = v
-            tau_panel[k] = tau
-            
-            # Apply Householder to remaining columns in this panel and trailing matrix
-            # H @ A[col:, col:] = A[col:, col:] - tau * v @ (v.T @ A[col:, col:])
-            if col < N:
-                trailing = R[col:, col:]
-                vT_A = v @ trailing
-                R[col:, col:] = trailing - tau * torch.outer(v, vT_A)
-            
-            # The diagonal element R[col, col] is now correct (-sign * norm_x)
-            # Zero out below diagonal explicitly (should already be zero from H)
-            R[col+1:, col] = 0.0
+        # Copy R part (on and above diagonal)
+        R[j:, j:j+jb] = panel_R
         
-        V_storage.append((j, V_panel, tau_panel))
+        # Extract V part (below diagonal, with implicit 1s)
+        V_panel = panel_R.clone()
+        for k in range(jb):
+            V_panel[:k+1, k] = 0.0  # Zero above diagonal (will be filled by R)
+            V_panel[k, k] = 0.0  # Will be implicit 1
+        
+        # Build T matrix
+        T_panel = _larft(V_panel, panel_tau)
+        
+        # Apply block reflector to trailing matrix
+        if j + jb < N:
+            trailing = R[j:, j+jb:]
+            R[j:, j+jb:] = _larfb(trailing, V_panel, T_panel, side='left', trans=True)
+        
+        # Store for Q reconstruction
+        V_storage.append((j, jb, V_panel, T_panel))
+        
+        j += jb
+    
+    # Zero below diagonal explicitly
+    R = torch.triu(R[:K, :])
     
     if mode == 'r':
-        return R[:K, :]
+        return R
     
-    # Form Q by accumulating Householder reflections
+    # Reconstruct Q by applying reflectors in reverse
     if mode == 'reduced':
         Q = torch.eye(M, K, device=device, dtype=dtype)
     else:  # complete
         Q = torch.eye(M, M, device=device, dtype=dtype)
     
-    # Apply Householder reflections in reverse order
-    for j, V_panel, tau_panel in reversed(V_storage):
-        bs = V_panel.shape[1]
-        
-        for k in range(bs - 1, -1, -1):
-            col = j + k
-            v = V_panel[k:, k]
-            tau = tau_panel[k]
-            
-            # Apply to Q[col:, col:]
-            if mode == 'reduced':
-                sub_Q = Q[col:, col:]
-            else:
-                sub_Q = Q[col:, :]
-            
-            vT_Q = v @ sub_Q
-            if mode == 'reduced':
-                Q[col:, col:] = sub_Q - tau * torch.outer(v, vT_Q)
-            else:
-                Q[col:, :] = sub_Q - tau * torch.outer(v, vT_Q)
+    for j, jb, V_panel, T_panel in reversed(V_storage):
+        # Apply H (not H^T) to Q[j:, j:] 
+        if mode == 'reduced':
+            sub_Q = Q[j:, j:]
+            Q[j:, j:] = _larfb(sub_Q, V_panel, T_panel, side='left', trans=False)
+        else:
+            sub_Q = Q[j:, :]
+            Q[j:, :] = _larfb(sub_Q, V_panel, T_panel, side='left', trans=False)
     
+    return Q, R
+
+
+def _qr_unblocked(A, mode='reduced'):
+    """
+    Unblocked Householder QR for small matrices.
+    """
+    device = A.device
+    dtype = A.dtype
+    M, N = A.shape
+    K = min(M, N)
+    
+    R, taus = _geqr2(A)
+    
+    # Zero below diagonal
+    R_out = torch.triu(R[:K, :])
+    
+    if mode == 'r':
+        return R_out
+    
+    # Build Q by applying Householder reflectors
     if mode == 'reduced':
-        return Q, R[:K, :]
-    else:  # complete
-        return Q, R
-
-
-def _qr_batched(A, mode='reduced', block_size=32):
-    """
-    Batched QR decomposition.
+        Q = torch.eye(M, K, device=device, dtype=dtype)
+    else:
+        Q = torch.eye(M, M, device=device, dtype=dtype)
     
-    For now, loop over batch dimension. Could be parallelized with
-    a proper Metal kernel.
-    """
+    for k in range(K - 1, -1, -1):
+        v = torch.zeros(M - k, device=device, dtype=dtype)
+        v[0] = 1.0
+        v[1:] = R[k+1:, k]  # Stored below diagonal
+        tau = taus[k]
+        
+        if mode == 'reduced':
+            sub_Q = Q[k:, k:]
+            vT_Q = v @ sub_Q
+            Q[k:, k:] = sub_Q - tau * torch.outer(v, vT_Q)
+        else:
+            sub_Q = Q[k:, :]
+            vT_Q = v @ sub_Q
+            Q[k:, :] = sub_Q - tau * torch.outer(v, vT_Q)
+    
+    return Q, R_out
+
+
+def _qr_batched(A, mode='reduced'):
+    """Batched QR decomposition."""
     batch_shape = A.shape[:-2]
     M, N = A.shape[-2:]
     
@@ -169,10 +352,10 @@ def _qr_batched(A, mode='reduced', block_size=32):
     
     for i in range(batch_size):
         if mode == 'r':
-            R_i = _qr_blocked(A_flat[i], mode='r', block_size=block_size)
+            R_i = qr(A_flat[i], mode='r')
             R_list.append(R_i)
         else:
-            Q_i, R_i = _qr_blocked(A_flat[i], mode=mode, block_size=block_size)
+            Q_i, R_i = qr(A_flat[i], mode=mode)
             Q_list.append(Q_i)
             R_list.append(R_i)
     
@@ -190,19 +373,10 @@ def qr_solve(A, b):
     Solve least squares problem using QR decomposition.
     
     Minimizes ||Ax - b||_2
-    
-    Args:
-        A: Matrix (M, N) with M >= N
-        b: Right-hand side (M,) or (M, K)
-        
-    Returns:
-        x: Solution (N,) or (N, K)
     """
     from .trsm import trsm
     
     Q, R = qr(A, mode='reduced')
-    
-    # x = R^{-1} @ Q.T @ b
     QT_b = Q.T @ b
     x = trsm(R, QT_b, lower=False)
     

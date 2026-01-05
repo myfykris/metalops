@@ -1,13 +1,13 @@
 import torch
-import metalsvd_backend
+import metalcore_backend as mc
 from . import config
 
-# Import Metal eigh for GPU-accelerated Gram SVD
+# Import eigh from this same package (now consolidated)
 try:
-    import metaleig
-    HAS_METALEIG = True
+    from . import eigh as eigh_module
+    HAS_EIGH = True
 except ImportError:
-    HAS_METALEIG = False
+    HAS_EIGH = False
 
 def svd(A: torch.Tensor):
     """
@@ -39,43 +39,22 @@ class SVDAutograd(torch.autograd.Function):
 
         if config.ENABLE_DE_RIJK_OPT:
             # De Rijk Strategy: Sort columns by norm descending to improve convergence
-            # 1. Compute column norms
-            col_norms = torch.linalg.norm(A_pad, dim=-2) # (B, N)
-            
-            # 2. Get sort indices
-            _, perm = torch.sort(col_norms, dim=-1, descending=True) # (B, N)
-            
-            # 3. Permute A columns
-            # perm: (B, N) -> (B, 1, N) for gather
-            perm_expanded = perm.unsqueeze(1).expand(A_pad.shape)
-            A_sorted = torch.gather(A_pad, -1, perm_expanded)
+            # Use fused Metal kernel (norm + argsort + permute in single dispatch)
+            A_sorted, perm = mc.column_norm_sort(A_pad)
             
             # Run Backend SVD on Sorted Matrix
-            U, S, V = metalsvd_backend.svd_forward(A_sorted)
+            U, S, V = mc.svd_forward(A_sorted)
             
-            # 4. Restore V rows (Scatter back)
-            # V is (B, N, N). We permuted columns of A, which corresponds to rows of V in SVD def?
-            # A_sorted = A * P.  A = U S V_sorted.T. 
-            # A * P = U S V_sorted.T  => A = U S V_sorted.T * P.T = U S (P * V_sorted).T
-            # So V_true = P * V_sorted.
-            # Only rows of V_sorted need to be permuted back to original indices.
-            
-            # We want V_final such that V_final[perm[i]] = V_sorted[i] (conceptually)
-            # Actually simpler: V_final.gather(1, perm_expanded_V) = V_sorted is not quite right for scatter.
-            # We use scatter explicitly.
-            
-            V_final = torch.empty_like(V)
-            # perm for V: (B, N, N) expanding along dim 2
-            perm_v = perm.unsqueeze(-1).expand(V.shape)
-            
-            # Scatter src=V into index=perm_v along dim=1 (rows)
+            # Restore V rows (scatter back using permutation)
             # V_final[b, perm[b, i], j] = V[b, i, j]
-            V_final.scatter_(1, perm_v, V)
+            V_final = torch.empty_like(V)
+            perm_v = perm.unsqueeze(-1).expand(V.shape)
+            V_final.scatter_(1, perm_v.to(torch.int64), V)
             V = V_final
             
         else:
             # Run Backend SVD Normally
-            U, S, V = metalsvd_backend.svd_forward(A_pad)
+            U, S, V = mc.svd_forward(A_pad)
         
         # Sort (Backend might not sort)
         S_sorted, indices = torch.sort(S, dim=-1, descending=True)
@@ -93,26 +72,9 @@ class SVDAutograd(torch.autograd.Function):
             U_sorted = U_sorted[..., :orig_N] 
             V_sorted = V_sorted[..., :orig_N, :orig_N]
 
-        # Sign Canonicalization
-        # Flip signs so that the element with max magnitude in each column of U is positive.
-        # This is more stable than just checking the first element.
-        
-        # U_sorted: (B, M, N)
-        # Find max abs index along dim 1
-        _, max_idx = torch.max(U_sorted.abs(), dim=1) # (B, N)
-        
-        # Gather the actual values at those indices
-        # max_idx: (B, N) -> (B, 1, N)
-        max_idx_expanded = max_idx.unsqueeze(1)
-        # Gather from U
-        max_vals = torch.gather(U_sorted, 1, max_idx_expanded).squeeze(1) # (B, N)
-        
-        signs = torch.sign(max_vals)
-        signs[signs == 0] = 1.0
-        
-        # Expand signs to broadcast
-        U_sorted = U_sorted * signs.unsqueeze(1)
-        V_sorted = V_sorted * signs.unsqueeze(1)
+        # Sign Canonicalization using fused Metal kernel
+        # Flip signs so that the element with max magnitude in each column of U is positive
+        mc.sign_canonicalize(U_sorted, V_sorted)
         
         ctx.save_for_backward(U_sorted, S_sorted, V_sorted)
         return U_sorted, S_sorted, V_sorted
@@ -224,18 +186,26 @@ def svd(A, full_matrices=False, compute_uv=True, strategy='auto'):
     if not is_batched:
         A = A.unsqueeze(0)
     
-    # Check CPU Fallback for Single SMALL Matrix (optimization for latency)
-    # For large matrices (N >= 1024), the Gram path is faster than CPU SVD.
-    # For smaller matrices (N < 1024), CPU is faster (Metal overhead dominates).
+    # Smart CPU Fallback based on benchmark data:
+    # - Single matrix N < 512: CPU wins (overhead dominates)
+    # - Single matrix N >= 512: GPU wins (computation dominates)
+    # - Batched: Always GPU (parallelism wins)
+    batch_size = A.size(0)
     N = A.shape[-1]
-    is_small = N < 1024
-    if config.ENABLE_CPU_FALLBACK and A.size(0) == 1 and is_small:
-         U, S, V = _svd_cpu_fallback(A) # returns (1, M, N)
-         if not is_batched:
-             U = U.squeeze(0)
-             S = S.squeeze(0)
-             V = V.squeeze(0)
-         return U, S, V
+    M = A.shape[-2]
+    
+    # For single matrices, CPU wins until ~512x512
+    # For very tall matrices, GPU wins earlier due to Gram strategy
+    is_single = (batch_size == 1)
+    is_small = (N < 512 and M < 1024)
+    
+    if config.ENABLE_CPU_FALLBACK and is_single and is_small:
+        U, S, V = _svd_cpu_fallback(A)
+        if not is_batched:
+            U = U.squeeze(0)
+            S = S.squeeze(0)
+            V = V.squeeze(0)
+        return U, S, V
 
     # Check Wide Matrix (M < N)
     # One-sided Jacobi requires M >= N.
@@ -313,14 +283,23 @@ def svd(A, full_matrices=False, compute_uv=True, strategy='auto'):
            
            # 3. Eigendecomposition of K
            # K is symmetric positive semi-definite.
-           # CPU eigh is used because:
-           # 1. Single large matrices: CPU LAPACK is faster than Metal eigh (~0.9x)
-           # 2. Transfer overhead is minimal since A^T@A on GPU produces K on GPU
-           # 3. CPU eigh (Divide & Conquer) is O(N^3) vs Jacobi O(k*N^3)
-           K_cpu = K.cpu()
-           L, V_k = torch.linalg.eigh(K_cpu)
-           V_k = V_k.to(A.device)
-           L = L.to(A.device)
+           # Smart routing based on batch size AND matrix size:
+           # - Batched with N ≤ 256: GPU EIGH is 3-4x faster (parallelism wins)
+           # - Batched with N > 256: CPU D&C is faster (Jacobi too slow for large N)
+           # - Single: CPU D&C is 3x faster (sequential, optimized)
+           batch_size = A.size(0)
+           N = K.size(-1)  # Size of Gram matrix
+           use_gpu_eigh = HAS_EIGH and batch_size > 1 and N <= 256
+           
+           if use_gpu_eigh:
+               # GPU path - stays on GPU, great for batched small/medium
+               L, V_k = eigh_module.eigh(K, strategy='jacobi')
+           else:
+               # CPU path - faster for single/large matrices
+               K_cpu = K.cpu()
+               L, V_k = torch.linalg.eigh(K_cpu)
+               V_k = V_k.to(A.device)
+               L = L.to(A.device)
            
            # eigh returns eigenvalues in ASCENDING order - flip to descending
            L = L.flip(-1)

@@ -1,20 +1,12 @@
 import torch
-import os
-from torch.utils.cpp_extension import load
 from . import config
 
-# Load Extension
-def get_cpp_source_path():
-    package_dir = os.path.dirname(os.path.abspath(__file__))
-    root_dir = os.path.abspath(os.path.join(package_dir, "../../.."))
-    native_dir = os.path.join(root_dir, "native")
-    return os.path.join(native_dir, "eigh_mps.mm")
-
-# Logic to compile/load
 try:
-    import metaleig_backend
+    import metalcore_backend as mc
+    HAS_BACKEND = True
 except ImportError:
-    metaleig_backend = None
+    mc = None
+    HAS_BACKEND = False
 
 
 def eigh(A, strategy='auto'):
@@ -66,9 +58,12 @@ def _select_strategy(N, batch_size, is_batched):
     - Batched N=128: Jacobi wins (~2.4x speedup)  
     - Batched N>=256: CPU is faster (Jacobi O(N²) per pair becomes expensive)
     
-    Tridiagonalization approach is correct but Python overhead makes it slower.
-    A proper Metal kernel for block Householder could help, but for now CPU wins.
+    Note: CPU fallback can be disabled via config.ENABLE_CPU_FALLBACK = False
     """
+    if not config.ENABLE_CPU_FALLBACK:
+        # CPU fallback disabled - always use GPU
+        return 'jacobi'
+    
     if not is_batched:
         # Single matrix: CPU is always faster
         return 'cpu'
@@ -82,10 +77,10 @@ def _select_strategy(N, batch_size, is_batched):
 
 def _eigh_jacobi(A, is_batched):
     """Use current Metal Jacobi implementation."""
-    if metaleig_backend is None:
-        raise ImportError("metaleig_backend not available. Please rebuild.")
+    if mc is None:
+        raise ImportError("metalcore_backend not available. Please rebuild.")
     
-    L, Q = metaleig_backend.eigh_forward(A)
+    L, Q = mc.eigh_forward(A)
     
     # Jacobi returns eigenvalues in arbitrary order
     # Sort them in ascending order to match torch.linalg.eigh convention
