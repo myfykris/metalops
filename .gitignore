@@ -22,6 +22,11 @@ venv/
 # Logs
 *.log
 venv_*
+benchmark_log_*.txt
+
+# Metal artifacts
+*.air
+*.metallib
 
 # Monorepo artifacts
 native_bundled/

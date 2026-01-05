@@ -2,55 +2,70 @@
 
 **MetalOps** is a collection of high-performance Metal-accelerated linear algebra operations for PyTorch on macOS (Apple Silicon).
 
-## Packages
+All operations are now consolidated into the single **`metalcore`** package.
 
-| Package | Description | Install |
-|---------|-------------|---------|
-| **[metalsvd](packages/metalsvd)** | GPU-Accelerated SVD | `pip install metalsvd` |
-| **[metaleig](packages/metaleig)** | GPU-Accelerated Eigendecomposition | `pip install metaleig` |
-| **[metalcore](packages/metalcore)** | GPU-Accelerated QR (batched) | `pip install metalcore` |
+## Features
 
-## Performance Highlights
+| Operation | Description | Performance Highlights |
+|-----------|-------------|------------------------|
+| **SVD** | Jacobi Singular Value Decomposition | Up to **25x faster** for LLM weight matrices (4096+) |
+| **QR** | Householder QR Decomposition | Up to **20x faster** for batched small matrices |
+| **Eigh** | Symmetric Eigendecomposition | Up to **3.5x faster** for batched matrices |
+| **Cholesky** | Cholesky Decomposition | Optimized for batched operations |
+| **Solve** | Linear System Solve (QR-based) | High throughput batched solver |
 
-See **[benchmarks.md](benchmarks.md)** for full results.
+## Installation
 
-| Operation | Best Speedup | When GPU Wins |
-|-----------|--------------|---------------|
-| **SVD** | up to 25× faster | Tall matrices (M >> N), batched, LLM weights |
-| **QR Batched** | up to 20× faster | Many small matrices (batch > 100) |
-| **EIGH Batched** | up to 3.5× faster | Batched medium matrices (64×64+) |
-| **LLM Weights** | up to 9× faster | Gemma, Llama, Mistral, Qwen, Phi weight SVD |
+```bash
+pip install metalcore
+```
 
 ## Quick Start
 
 ```python
 import torch
-import metalsvd
-import metaleig
+import metalcore
 
 device = torch.device("mps")
 
-# SVD (up to 25x faster for LLM weight matrices)
-A = torch.randn(64, 128, 128, device=device)
-U, S, V = metalsvd.svd(A)
+# SVD (Fast for large LLM matrices)
+A = torch.randn(4096, 4096, device=device)
+U, S, V = metalcore.svd(A)
 
-# Eigendecomposition (up to 3.5x faster for batched)
-B = torch.randn(64, 64, 64, device=device)
-B = B + B.transpose(-2, -1)  # Make symmetric
-eigenvalues, eigenvectors = metaleig.eigh(B)
+# Batched QR (Fast for many small matrices)
+B = torch.randn(500, 16, 16, device=device)
+Q, R = metalcore.qr_batched(B)
+
+# Eigendecomposition
+C = torch.randn(64, 64, 64, device=device)
+C = C + C.transpose(-2, -1)  # Make symmetric
+eigenvalues, eigenvectors = metalcore.eigh(C)
 ```
+
+## Performance
+
+See **[benchmarks.md](benchmarks.md)** for detailed benchmark results across all algorithms.
+
+## Usage Recommendations
+
+| Operation | When to Use Metal | When to Use CPU |
+|-----------|-------------------|-----------------|
+| **SVD** | Batched small/medium matrices, Single large matrices | - |
+| **QR** | Batched small/medium matrices | Single large matrices (sequential bottleneck) |
+| **EIGH** | Batched symmetric matrices | - |
+| **Pipeline** | Chained operations (avoid CPU<->GPU transfer) | Single ops on CPU-resident data |
 
 ## Requirements
 
 - macOS 12.0+ with Apple Silicon (M1/M2/M3/M4)
-- Python 3.9+
+- Python 3.9 - 3.14
 - PyTorch 2.0+
 
 ## Development
 
 ```bash
-# Install all packages in editable mode
-pip install -e packages/metalsvd -e packages/metaleig -e packages/metalcore
+# Install package in editable mode
+pip install -e packages/metalcore
 
 # Run benchmarks
 python benchmark.py

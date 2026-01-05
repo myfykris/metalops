@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metalcore"
-version = "0.0.1"
+version = "0.1.0"
 description = "Foundational Metal Linear Algebra Primitives for PyTorch"
 readme = "README.md"
 requires-python = ">=3.9"

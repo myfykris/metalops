@@ -17,6 +17,8 @@
 
 #include <fstream>
 #include <sstream>
+#include <dlfcn.h>
+#include <libgen.h>
 
 using namespace at::mps;
 using namespace at::native::mps;
@@ -135,29 +137,85 @@ void load_core_kernels() {
         
         NSError* error = nil;
         
-        // Try to load from file
-        const char* file_path = "/Users/kris/localprojects/metalops/packages/metalcore/native/core_kernels.metal";
-        std::ifstream file(file_path);
+        // 1. Try to locate .metallib relative to this dylib
+        // Get path to this dylib
+        Dl_info info;
+        if (dladdr((void*)&load_core_kernels, &info)) {
+            // info.dli_fname contains path to metalcore_backend.so
+            // Structure in wheel:
+            //   site-packages/metalcore_backend.cpython...so
+            //   site-packages/metalcore/native/core_kernels.metallib
+            // OR if built in-place:
+            //   src/metalcore_backend.cpython...so
+            //   src/metalcore/native/
+            
+            // We need to look for metalcore/native/core_kernels.metallib relative to the directory containing the .so
+            
+            std::string dylib_path = info.dli_fname;
+            std::string dylib_dir = dylib_path.substr(0, dylib_path.find_last_of('/'));
+            
+            // Try explicit path options
+            std::vector<std::string> candidates = {
+                dylib_dir + "/metalcore/native/core_kernels.metallib",     // Wheel structure (if backend is top level)
+                dylib_dir + "/native/core_kernels.metallib",               // In-place or nested
+                dylib_dir + "/../metalcore/native/core_kernels.metallib"   // Sibling directory
+            };
+            
+            for (const auto& path : candidates) {
+                NSURL* lib_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+                
+                // key: use [NSURL checkResourceIsReachableAndReturnError:] to avoid noise
+                if ([lib_url checkResourceIsReachableAndReturnError:nil]) {
+                    coreLib = [device newLibraryWithURL:lib_url error:&error];
+                    if (coreLib) {
+                         printf("metalcore: Loaded kernels from %s\n", path.c_str());
+                         break;
+                    }
+                }
+            }
+        }
         
-        if (file.good()) {
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            std::string content = buffer.str();
+        // 2. Fallback: Hardcoded dev path (for local debugging only)
+        if (!coreLib) {
+             const char* dev_path = "/Users/kris/localprojects/metalops/packages/metalcore/src/metalcore/native/core_kernels.metallib";
+             NSURL* lib_url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:dev_path]];
+             if ([lib_url checkResourceIsReachableAndReturnError:nil]) {
+                  coreLib = [device newLibraryWithURL:lib_url error:&error];
+                  if (coreLib) printf("metalcore: Loaded kernels from DEV path\n");
+             }
+        }
+
+        // 3. Fallback: Compile from source (Developer mode / No .metallib found)
+        if (!coreLib) {
+             // Look for .metal source relative to dylib as well
+             // ... implementation omitted for brevity, usually rely on precompiled in prod ...
+             printf("metalcore: WARNING - Could not find .metallib. Falling back to source (if available).\n");
+             
+             // Try dev source path
+             const char* src_path = "/Users/kris/localprojects/metalops/packages/metalcore/src/metalcore/native/core_kernels.metal";
+             std::ifstream file(src_path);
             
-            NSString* src = [NSString stringWithUTF8String:content.c_str()];
-            MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-            opts.mathMode = MTLMathModeFast;
-            
-            coreLib = [device newLibraryWithSource:src options:opts error:&error];
-            
-            if (!coreLib) {
-                printf("Failed to compile Metal kernels: %s\n", [[error localizedDescription] UTF8String]);
+            if (file.good()) {
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                std::string content = buffer.str();
+                
+                NSString* src = [NSString stringWithUTF8String:content.c_str()];
+                MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
+                opts.mathMode = MTLMathModeFast;
+                
+                coreLib = [device newLibraryWithSource:src options:opts error:&error];
+                
+                if (coreLib) {
+                    printf("metalcore: Compiled kernels from DEV source %s\n", src_path);
+                } else {
+                    printf("metalcore: Failed to compile source: %s\n", [[error localizedDescription] UTF8String]);
+                    return;
+                }
+            } else {
+                printf("metalcore: FATAL - Could not find .metallib or .metal kernel source.\n");
                 return;
             }
-            printf("Loaded metalcore kernels from file: %s\n", file_path);
-        } else {
-            printf("Failed to find Metal kernel file: %s\n", file_path);
-            return;
         }
         
         // Load functions

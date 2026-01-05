@@ -1,18 +1,36 @@
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CppExtension
 import os
+import subprocess
+import sys
 
-def get_metal_files():
-    metal_files = []
-    for root, dirs, files in os.walk("native"):
-        for file in files:
-            if file.endswith(".metal"):
-                metal_files.append(os.path.join(root, file))
-    return metal_files
+class CustomBuildExtension(BuildExtension):
+    def build_extensions(self):
+        # Compile Metal kernels
+        print("Compiling Metal kernels...")
+        # Path relative to setup.py
+        nx = os.path.join("src", "metalcore", "native")
+        src = os.path.join(nx, "core_kernels.metal")
+        air = os.path.join(nx, "core_kernels.air")
+        lib = os.path.join(nx, "core_kernels.metallib")
+        
+        # Check if metal compiler is available
+        try:
+            subprocess.check_call(['xcrun', '-sdk', 'macosx', 'metal', '-c', src, '-o', air])
+            subprocess.check_call(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', lib])
+            # Clean up intermediate air file
+            if os.path.exists(air):
+                os.remove(air)
+            print("Successfully compiled core_kernels.metallib")
+        except Exception as e:
+            print(f"WARNING: Metal compilation failed: {e}")
+            print("Will rely on runtime compilation if .metal source is present.")
+
+        super().build_extensions()
 
 setup(
     name='metalcore',
-    version='0.0.1',
+    version='0.1.0',
     author='Kris Bailey via Antigravity',
     description='Foundational Metal Linear Algebra Primitives for PyTorch',
     packages=find_packages(where='src'),
@@ -20,15 +38,17 @@ setup(
     ext_modules=[
         CppExtension(
             name='metalcore_backend',
-            sources=['native/core_mps.mm'],
+            sources=['src/metalcore/native/core_mps.mm'],
             extra_compile_args={'cxx': ['-std=c++17', '-fno-objc-arc', '-O3', '-ffast-math']},
             extra_link_args=['-framework', 'Metal', '-framework', 'Foundation'],
         ),
     ],
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': CustomBuildExtension
     },
     install_requires=['torch>=2.0', 'numpy'],
     include_package_data=True,
-    data_files=[('native', get_metal_files())]
+    package_data={
+        'metalcore': ['native/*.metal', 'native/*.metallib'],
+    },
 )

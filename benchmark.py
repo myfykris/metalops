@@ -1034,85 +1034,101 @@ def main():
     results = BenchmarkResults()
     
     # SVD benchmarks
-    svd_results = benchmark_svd()
-    if svd_results:
-        results.add_section(
-            "SVD (metalsvd)",
-            "Singular Value Decomposition using Jacobi algorithm on GPU",
-            ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
-            svd_results
-        )
+    svd_results = []
+    if RUN_SVD:
+        svd_results = benchmark_svd()
+        if svd_results:
+            results.add_section(
+                "SVD (metalsvd)",
+                "Singular Value Decomposition using Jacobi algorithm on GPU",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
+                svd_results
+            )
     
     # QR single matrix benchmarks
-    qr_single_results = benchmark_qr_single()
-    if qr_single_results:
-        results.add_section(
-            "QR Single Matrix (metalcore)",
-            "Single matrix QR - CPU typically wins due to sequential dependencies",
-            ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon", "Ortho"],
-            qr_single_results
-        )
+    qr_single_results = []
+    if RUN_QR:
+        qr_single_results = benchmark_qr_single()
+        if qr_single_results:
+            results.add_section(
+                "QR Single Matrix (metalcore)",
+                "Single matrix QR - CPU typically wins due to sequential dependencies",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon", "Ortho"],
+                qr_single_results
+            )
     
     # QR batched benchmarks
-    qr_batched_results = benchmark_qr_batched()
-    if qr_batched_results:
-        results.add_section(
-            "QR Batched (metalcore) ⭐ GPU WINS",
-            "Batched QR - GPU processes all matrices in parallel, single dispatch",
-            ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
-            qr_batched_results
-        )
+    qr_batched_results = []
+    if RUN_QR:
+        qr_batched_results = benchmark_qr_batched()
+        if qr_batched_results:
+            results.add_section(
+                "QR Batched (metalcore) ⭐ GPU WINS",
+                "Batched QR - GPU processes all matrices in parallel, single dispatch",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
+                qr_batched_results
+            )
     
     # Cholesky benchmarks
-    cholesky_results = benchmark_cholesky()
-    if cholesky_results:
-        results.add_section(
-            "Cholesky (metalcore) ⭐ GPU WINS",
-            "Batched Cholesky decomposition with MAGMA-style shared memory",
-            ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
-            cholesky_results
-        )
+    cholesky_results = []
+    if RUN_CHOLESKY:
+        cholesky_results = benchmark_cholesky()
+        if cholesky_results:
+            results.add_section(
+                "Cholesky (metalcore) ⭐ GPU WINS",
+                "Batched Cholesky decomposition with MAGMA-style shared memory",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
+                cholesky_results
+            )
     
     # Solve benchmarks
-    solve_results = benchmark_solve()
-    if solve_results:
-        results.add_section(
-            "Linear Solve (metalcore)",
-            "Batched linear system solve using QR + TRSM",
-            ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Residual"],
-            solve_results
-        )
+    solve_results = []
+    if RUN_SOLVE:
+        solve_results = benchmark_solve()
+        if solve_results:
+            results.add_section(
+                "Linear Solve (metalcore)",
+                "Batched linear system solve using QR + TRSM",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Residual"],
+                solve_results
+            )
     
     # EIGH benchmarks
-    eigh_results = benchmark_eigh()
-    if eigh_results:
-        results.add_section(
-            "Eigendecomposition (metaleig)",
-            "Symmetric eigenvalue decomposition",
-            ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
-            eigh_results
-        )
+    eigh_results = []
+    if RUN_EIGH:
+        eigh_results = benchmark_eigh()
+        if eigh_results:
+            results.add_section(
+                "Eigendecomposition (metaleig)",
+                "Symmetric eigenvalue decomposition",
+                ["Shape", "Config", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
+                eigh_results
+            )
     
     # Pipeline benchmarks
-    pipeline_results = benchmark_pipeline()
-    if pipeline_results:
-        results.add_section(
-            "Pipeline Operations ⭐ GPU WINS (No Transfer)",
-            "Chained operations where data stays on GPU - avoids costly memory transfers",
-            ["Pipeline", "Shape", "GPU", "Comparison", "Ratio", "Status"],
-            pipeline_results
-        )
+    pipeline_results = []
+    if RUN_PIPELINE:
+        pipeline_results = benchmark_pipeline()
+        if pipeline_results:
+            results.add_section(
+                "Pipeline Operations ⭐ GPU WINS (No Transfer)",
+                "Chained operations where data stays on GPU - avoids costly memory transfers",
+                ["Pipeline", "Shape", "GPU", "Comparison", "Ratio", "Status"],
+                pipeline_results
+            )
     
     # LLM Model Families benchmarks
-    model_results = benchmark_models()
-    for model_name, model_data in model_results.items():
-        if model_data:
-            results.add_section(
-                f"LLM: {model_name}",
-                f"SVD performance on {model_name} weight matrix sizes",
-                ["Shape", "Layer", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
-                model_data
-            )
+    model_results = {}
+    if RUN_MODELS:
+        model_results = benchmark_models()
+        for model_name, model_data in model_results.items():
+            if model_data:
+                results.add_section(
+                    f"LLM: {model_name}",
+                    f"SVD performance on {model_name} weight matrix sizes",
+                    ["Shape", "Layer", "Metal", "CPU", "Ratio", "Status", "Recon Error"],
+                    model_data
+                )
     
     # Add summary section
     results.add_section(
