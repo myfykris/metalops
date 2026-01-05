@@ -7,11 +7,11 @@ on:
     branches: [ main ]
 
 jobs:
-  test-metalsvd:
+  test-metalcore:
     runs-on: macos-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -26,12 +26,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install torch numpy pytest
 
-    - name: Install metalsvd
+    - name: Install metalcore
       run: |
-        cd packages/metalsvd
+        cd packages/metalcore
         pip install .
 
     - name: Run tests
       run: |
-        cd packages/metalsvd
+        cd packages/metalcore
+        # Run standard tests (skipping heavy benchmarks if any)
         pytest
