@@ -1,73 +1,35 @@
 # Tasks
 
-[x] Project Setup
-  [x] Create project directory structure
-  [x] Create `setup.py`
+## Completed
 
-[x] Core Implementation
-  [x] Metal Kernels (Jacobi, Transpose, Norms)
-  [x] Host Orchestrator (C++)
-  [x] Python Bindings
+### Package Consolidation ✅
+- [x] Merged metalsvd Metal kernels into metalcore
+- [x] Merged metaleig Metal kernels into metalcore  
+- [x] Removed packages/metalsvd and packages/metaleig directories
+- [x] Updated PYBIND11 exports
 
-[x] Large Matrix Support (Randomized SVD)
-  [x] Implementation
-  [x] Verification 10k x 10k
+### Core Operations ✅
+- [x] SVD (Jacobi, De Rijk, sign canonicalization)
+- [x] Eigh (Jacobi eigendecomposition)
+- [x] QR (Householder, batched)
+- [x] Cholesky (MAGMA-style shared memory)
+- [x] TRSM (triangular solve)
+- [x] Solve (QR-based batched)
 
-[x] Optimization
-  [x] Threadgroup Reduction (20x speedup)
-  [x] Fused Block-Jacobi Kernel (Reduce Async Overhead)
-    [x] Implement Kernel
-    [x] Implement Host Dispatch
-    [x] Verify Speedup (Stable! Optimized for small N)
+### High-Impact Kernels ✅
+- [x] LU decomposition (with pivoting)
+- [x] SYRK (A.T @ A)
+- [x] Frobenius norm
+- [x] Softmax (numerically stable)
+- [x] Trace
 
-[x] Release Polish
-  [x] Autograd
-  [x] Odd Dimensions robustness
+### Benchmarking ✅
+- [x] Unified benchmark.py with all operations
+- [x] --compare flag for historical comparison
+- [x] Runtime tracking saved to benchmark_history.jsonl
 
-[x] Advanced Algorithms ("Harder but Better")
-  [x] Implement Golub-Kahan-Lanczos Bidiagonalization
-  [x] Implement Full Re-orthogonalization
-  [x] Benchmark Lanczos vs rSVD
-
-[x] Verification & Robustness
-  [x] Stress Testing (120 edge cases)
-  [x] Verify Correctness (Valid inputs -> Valid Valid outputs)
-    [x] Square, Tall, Odd, Small, Batched
-    [x] Handle Wide Matrix (Explicit Error -> Pass)
-
-[x] Production Readiness
-  [x] Implement Monkeypatching (`patch_torch()`)
-  [x] Implement FP16 Support (`svd.metal` templating)
-    [x] Modify Metal Kernels (Templated)
-    [x] Modify Host Code (Dispatch / Durability)
-    [x] Verify FP16 Accuracy (Works!)
-  [x] Benchmark FP16 vs FP32
-  [x] Update Documentation (Universal Shape, Monkeypatching, usage, Install)
-  [x] Scikit-Learn Support (`MetalTruncatedSVD`)
-
-[x] Cleanup & Release
-  [x] Identify cruft files
-  [x] Move cruft to `unneeded/`
-  [x] Update `.gitignore`
-  [x] Add LICENSE (MIT, Kris Bailey via Antigravity)
-  [x] Update Metadata (setup.py)
-  [x] Init Git and Push to GitHub
-  [x] Rename to `metalsvd` (Code, Docs, Repo)
-  [x] Verify Autograd (Forward/Backward)
-  [x] Create `benchmark_suite.py` (Heavy verification)
-  [x] Stress Breaker (Fuzzing & Edge Cases: NaN, Zero, Rank-1, Ill-cond)
-  [x] Publish to PyPI (Wheels built)
-  [x] Build Wheels for Python 3.10, 3.11, 3.12, 3.13, 3.14 (Multi-version Support)
-  
-[ ] User Directed Optimization (v0.0.3)
-  [x] Benchmarking Infrastructure
-    [x] Create comprehensive `benchmark_suite.py`
-    [x] Add user-prioritized geometries (Huge)
-  [x] Specialized Kernels for Small/Medium
-    [x] Implement Fused Kernel (N=64, 128, 256)
-    [x] Fix compilation errors (structs, PSOs)
-  [x] Optimize Huge Matrices (4096 x 11008)
-    [x] Enable ICB for N >= 256 (Fixed Segfaults)
-    [x] Tune Threadgroup Size (1024 threads)
-    [x] Implement Vectorized Kernel (float4) -> Attempted (Slower, Reverted)
-  [x] Optimize Micro Matrices (N < 32) -> Not Prioritized (Baseline sufficient)
+## Future Work
+- [ ] Publish metalcore to PyPI
+- [ ] Deprecate metalsvd on PyPI (yank 0.0.3)
+- [ ] Complex number support
+- [ ] Additional BLAS Level 3 operations
