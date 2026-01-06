@@ -93,6 +93,77 @@ kernel void rmsnorm_fwd(
     }
 }
 
+// -----------------------------------------------------------------------------
+// Fused Add + RMSNorm (vLLM-style optimization)
+// Combines: residual = input + residual; output = rmsnorm(residual)
+// Saves one memory round-trip compared to separate ops
+// -----------------------------------------------------------------------------
+kernel void fused_add_rmsnorm(
+    device float* input [[buffer(0)]],       // [..., hidden_size] - overwritten with output
+    device float* residual [[buffer(1)]],    // [..., hidden_size] - updated in-place
+    device const float* W [[buffer(2)]],     // [hidden_size]
+    device float* Rstd [[buffer(3)]],        // [B] - save for backward
+    constant uint& N [[buffer(4)]],          // hidden_size
+    constant float& eps [[buffer(5)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 threadsPerThreadgroup [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint tid_x = tid.x;
+    uint offset = row * N;
+    
+    // Pass 1: Add residual and compute sum of squares
+    float sum_sq = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        // Fused add: input[i] + residual[i]
+        float val = input[offset + i] + residual[offset + i];
+        // Store fused value back to residual
+        residual[offset + i] = val;
+        sum_sq += val * val;
+    }
+    
+    // Reduction (same as rmsnorm_fwd)
+    float simd_sum_sq = simd_sum(sum_sq);
+    threadgroup float shared_sums[32];
+    
+    if (simd_lane_id == 0) {
+        shared_sums[simd_group_id] = simd_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float total_sum_sq = 0.0f;
+    if (simd_group_id == 0) {
+        uint num_simd_groups = (threadsPerThreadgroup.x + 31) / 32;
+        float partial = 0.0f;
+        if (simd_lane_id < num_simd_groups) {
+            partial = shared_sums[simd_lane_id];
+        }
+        total_sum_sq = simd_sum(partial);
+    }
+    
+    if (simd_group_id == 0 && simd_lane_id == 0) {
+        shared_sums[0] = total_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    total_sum_sq = shared_sums[0];
+    
+    float rstd = rsqrt(total_sum_sq / float(N) + eps);
+    
+    if (tid_x == 0) {
+        Rstd[row] = rstd;
+    }
+    
+    // Pass 2: Apply RMSNorm and write to input
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float val = residual[offset + i];
+        float w = W[i];
+        input[offset + i] = val * rstd * w;
+    }
+}
 
 // Backward Pass Inputs:
 // grad_y (B, N)
@@ -266,6 +337,79 @@ kernel void adamw_step(
     exp_avg_sq[id] = v;
 }
 
+// -----------------------------------------------------------------------------
+// AdamW ILP=4 Kernel (DeepSpeed-style optimization)
+// Process 4 float4 vectors per thread to hide memory latency
+// -----------------------------------------------------------------------------
+kernel void adamw_step_ilp4(
+    device float4* params [[buffer(0)]],
+    device const float4* grads [[buffer(1)]],
+    device float4* exp_avg [[buffer(2)]],
+    device float4* exp_avg_sq [[buffer(3)]],
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    constant uint& numel [[buffer(11)]],  // Number of float4 elements
+    uint id [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]
+) {
+    // ILP = 4: Each thread processes 4 float4 vectors
+    constexpr int ILP = 4;
+    
+    // Stride through data with ILP
+    for (uint base = id * ILP; base < numel; base += threads * ILP) {
+        // Load all values into registers first (hide latency)
+        float4 r_p[ILP];
+        float4 r_g[ILP];
+        float4 r_m[ILP];
+        float4 r_v[ILP];
+        
+        // Coalesced loads with bounds checking
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                r_p[ii] = params[idx];
+                r_g[ii] = grads[idx];
+                r_m[ii] = exp_avg[idx];
+                r_v[ii] = exp_avg_sq[idx];
+            }
+        }
+        
+        // Compute updates (all in registers)
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                // Weight decay (decoupled AdamW)
+                r_p[ii] = r_p[ii] - lr * weight_decay * r_p[ii];
+                
+                // Update moments
+                r_m[ii] = beta1 * r_m[ii] + (1.0f - beta1) * r_g[ii];
+                r_v[ii] = beta2 * r_v[ii] + (1.0f - beta2) * (r_g[ii] * r_g[ii]);
+                
+                // Bias correction and parameter update
+                float4 m_hat = r_m[ii] / bias_correction1;
+                float4 v_hat = r_v[ii] / bias_correction2;
+                float4 denom = sqrt(v_hat) + eps;
+                r_p[ii] = r_p[ii] - lr * (m_hat / denom);
+            }
+        }
+        
+        // Write back (coalesced stores)
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                params[idx] = r_p[ii];
+                exp_avg[idx] = r_m[ii];
+                exp_avg_sq[idx] = r_v[ii];
+            }
+        }
+    }
+}
+
 // =============================================================================
 // HALF PRECISION (fp16) VARIANTS
 // =============================================================================
@@ -336,6 +480,108 @@ kernel void rmsnorm_fwd_half(
         Y[offset + i] = half(val * rstd * w);
     }
 }
+
+// -----------------------------------------------------------------------------
+// RMSNorm Half4 ILP=2 - 8-wide effective vectorization using 2 half4 loads
+// Requires N to be divisible by 8
+// -----------------------------------------------------------------------------
+kernel void rmsnorm_fwd_half_vec(
+    device const half4* X [[buffer(0)]],
+    device const half4* W [[buffer(1)]],
+    device half4* Y [[buffer(2)]],
+    device float* Rstd [[buffer(3)]],
+    constant uint& N4 [[buffer(4)]],  // N / 4
+    constant float& eps [[buffer(5)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 threadsPerThreadgroup [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint tid_x = tid.x;
+    uint offset = row * N4;
+    
+    // Accumulate in float for stability
+    float sum_sq = 0.0f;
+    
+    // ILP=2: Process 2 half4 vectors per iteration (8 elements total)
+    for (uint i = tid_x * 2; i < N4; i += threadsPerThreadgroup.x * 2) {
+        // Load 2 half4 vectors (hide latency)
+        half4 vec0 = X[offset + i];
+        half4 vec1 = (i + 1 < N4) ? X[offset + i + 1] : half4(0.0h);
+        
+        // Accumulate first vector
+        sum_sq += float(vec0.x) * float(vec0.x);
+        sum_sq += float(vec0.y) * float(vec0.y);
+        sum_sq += float(vec0.z) * float(vec0.z);
+        sum_sq += float(vec0.w) * float(vec0.w);
+        
+        // Accumulate second vector
+        if (i + 1 < N4) {
+            sum_sq += float(vec1.x) * float(vec1.x);
+            sum_sq += float(vec1.y) * float(vec1.y);
+            sum_sq += float(vec1.z) * float(vec1.z);
+            sum_sq += float(vec1.w) * float(vec1.w);
+        }
+    }
+    
+    // Reduction
+    float simd_sum_sq = simd_sum(sum_sq);
+    threadgroup float shared_sums[32];
+    
+    if (simd_lane_id == 0) {
+        shared_sums[simd_group_id] = simd_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float total_sum_sq = 0.0f;
+    if (simd_group_id == 0) {
+        uint num_simd_groups = (threadsPerThreadgroup.x + 31) / 32;
+        float partial = 0.0f;
+        if (simd_lane_id < num_simd_groups) {
+            partial = shared_sums[simd_lane_id];
+        }
+        total_sum_sq = simd_sum(partial);
+    }
+    
+    if (simd_group_id == 0 && simd_lane_id == 0) {
+        shared_sums[0] = total_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    total_sum_sq = shared_sums[0];
+    
+    uint N = N4 * 4;
+    float rstd = rsqrt(total_sum_sq / float(N) + eps);
+    
+    if (tid_x == 0) {
+        Rstd[row] = rstd;
+    }
+    
+    // ILP=2: Process 2 half4 vectors per iteration
+    for (uint i = tid_x * 2; i < N4; i += threadsPerThreadgroup.x * 2) {
+        half4 x0 = X[offset + i];
+        half4 w0 = W[i];
+        half4 y0;
+        y0.x = half(float(x0.x) * rstd * float(w0.x));
+        y0.y = half(float(x0.y) * rstd * float(w0.y));
+        y0.z = half(float(x0.z) * rstd * float(w0.z));
+        y0.w = half(float(x0.w) * rstd * float(w0.w));
+        Y[offset + i] = y0;
+        
+        if (i + 1 < N4) {
+            half4 x1 = X[offset + i + 1];
+            half4 w1 = W[i + 1];
+            half4 y1;
+            y1.x = half(float(x1.x) * rstd * float(w1.x));
+            y1.y = half(float(x1.y) * rstd * float(w1.y));
+            y1.z = half(float(x1.z) * rstd * float(w1.z));
+            y1.w = half(float(x1.w) * rstd * float(w1.w));
+            Y[offset + i + 1] = y1;
+        }
+    }
+}
+
 
 kernel void rmsnorm_bwd_dx_half(
     device const half* dY [[buffer(0)]],
