@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metalcore"
-version = "0.1.7"
+version = "0.1.6"
 description = "Foundational Metal Linear Algebra Primitives for PyTorch"
 readme = "README.md"
-requires-python = ">=3.9"
 license = {text = "MIT"}
+requires-python = ">=3.9"
 
 authors = [
   { name = "Kris Bailey", email = "kris@krisbailey.com" }

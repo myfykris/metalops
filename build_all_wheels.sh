@@ -32,7 +32,25 @@ for env in "${environments[@]}"; do
 done
 
 echo "------------------------------------------------"
-echo "All Builds Complete. Wheels in dist/:"
-ls -lh dist/
+echo "All Builds Complete. Fixing wheel metadata..."
+
+# Fix License-File metadata issue for PyPI compatibility
+for w in packages/metalcore/dist/*.whl; do
+    echo "Fixing: $w"
+    tmpdir=$(mktemp -d)
+    unzip -q "$w" -d "$tmpdir"
+    # Remove ONLY the License-File line from METADATA
+    metafile=$(ls "$tmpdir"/metalcore-*.dist-info/METADATA)
+    grep -v "^License-File:" "$metafile" | grep -v "^Dynamic: license-file" > "$metafile.tmp"
+    mv "$metafile.tmp" "$metafile"
+    # Repack wheel
+    rm "$w"
+    (cd "$tmpdir" && zip -rq "../fixed.whl" .)
+    mv "$(dirname $tmpdir)/fixed.whl" "$w"
+    rm -rf "$tmpdir"
+done
+
+echo "Wheels in packages/metalcore/dist/:"
+ls -lh packages/metalcore/dist/
 echo "Verifying .metallib in wheels..."
-for w in dist/*.whl; do unzip -l "$w" | grep .metallib && echo "  - OK: $w"; done
+for w in packages/metalcore/dist/*.whl; do unzip -l "$w" | grep .metallib && echo "  - OK: $w"; done
