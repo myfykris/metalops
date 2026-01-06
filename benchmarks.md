@@ -1,97 +1,8 @@
 # Metalops Benchmark Results
 
-*Last updated: 2026-01-05T16:46:09.956753*
+*Generated: 2026-01-05 21:16:37*
 
 **Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | ⚪ Close | 🟠 CPU wins | 🔴 CPU wins big (>3x)
-
-## Cholesky (metalcore) ⭐ GPU WINS
-
-*Batched Cholesky decomposition with MAGMA-style shared memory*
-
-| Shape | Config | Metal | CPU | Ratio | Status | Recon Error |
-|---|---|---|---|---|---|---|
-| 100×16×16 | Tiny batched | 283.5µs | 4.9ms | 0.06x | 💚 | ✓ 4e-06 |
-| 100×32×32 | Small batched | 434.2µs | 4.9ms | 0.09x | 💚 | ✓ 1e-05 |
-| 100×64×64 | Larger batched | 1.1ms | 5.0ms | 0.22x | 💚 | ✓ 2e-05 |
-| 200×48×48 | Medium batched | 1.1ms | 10.1ms | 0.10x | 💚 | ✓ 2e-05 |
-| 500×16×16 | Large batch tiny | 457.2µs | 24.2ms | 0.02x | 💚 | ✓ 4e-06 |
-
-## AdamW (metalcore) ⭐ GPU WINS
-
-*Fused AdamW optimizer step vs torch.optim.AdamW*
-
-| Params | Size | Metal | CPU | Ratio | Status |
-|---|---|---|---|---|---|
-| 10M Params | N=10485760 | 1.1ms | 3.1ms | 0.36x | 🟢 |
-| 16M Params | N=16777216 | 1.6ms | 4.7ms | 0.35x | 🟢 |
-| 1M Params | N=1048576 | 327.9µs | 592.9µs | 0.55x | 🟢 |
-| 1M Params | N=1048576 bf16 | 341.5µs | 1.0ms | 0.33x | 🟢 |
-| 1M Params | N=1048576 fp16 | 319.8µs | 1.0ms | 0.32x | 🟢 |
-| 1M Params | N=1048576 fp32 | 296.4µs | 913.0µs | 0.32x | 🟢 |
-
-## QR Batched (metalcore) ⭐ GPU WINS
-
-*Batched QR via Householder reflections*
-
-| Shape | Config | Metal | CPU | Ratio | Status | Recon Error |
-|---|---|---|---|---|---|---|
-| 1000×16×16 | Batch 1000 16x16 | 3.4ms | 51.4ms | 0.07x | 💚 | ✓ 7e-07 |
-| 100×16×16 | Batch 100 16x16 | 1.0ms | 5.1ms | 0.20x | 💚 | ✓ 2e-06 |
-| 100×32×32 | Batch 100 32x32 | 2.3ms | 5.7ms | 0.40x | 🟢 | ✓ 1e-06 |
-| 100×32×64 | Wide batch | 4.2ms | 5.9ms | 0.71x | ⚪ | ✓ 1e-06 |
-| 100×48×48 | Batch 100 48x48 | 4.9ms | 6.7ms | 0.73x | ⚪ | ✓ 1e-06 |
-| 100×64×32 | Tall batch | 2.8ms | 6.2ms | 0.45x | 🟢 | ✓ 1e-06 |
-| 100×8×8 | Batch 100 tiny | 791.8µs | 4.9ms | 0.16x | 💚 | ✓ 5e-07 |
-| 200×16×16 | Batch 200 16x16 | 1.3ms | 11.1ms | 0.12x | 💚 | ✓ 8e-07 |
-| 200×32×32 | Batch 200 32x32 | 3.0ms | 11.2ms | 0.27x | 💚 | ✓ 1e-06 |
-| 200×64×32 | Large tall batch | 4.9ms | 12.4ms | 0.40x | 🟢 | ✓ 1e-06 |
-| 500×16×16 | Batch 500 16x16 | 3.1ms | 25.7ms | 0.12x | 💚 | ✓ 7e-07 |
-| 500×32×32 | Batch 500 32x32 | 6.8ms | 28.1ms | 0.24x | 💚 | ✓ 1e-06 |
-| 500×8×8 | Batch 500 tiny | 2.1ms | 24.7ms | 0.09x | 💚 | ✓ 6e-07 |
-| 50×16×16 | ML mini-batch 16 | 971.8µs | 2.6ms | 0.38x | 🟢 | ✓ 2e-06 |
-| 50×32×32 | ML mini-batch 32 | 2.4ms | 2.8ms | 0.85x | ⚪ | ✓ 8e-07 |
-| 50×48×48 | Batch 50 48x48 | 5.0ms | 3.4ms | 1.47x | 🟠 | ✓ 1e-06 |
-| 50×8×8 | Tiny 8x8 | 714.0µs | 2.5ms | 0.29x | 💚 | ✓ 8e-07 |
-
-## Linear Solve (metalcore) ⭐ GPU WINS
-
-*Fused LU decomposition with forward/back substitution*
-
-| Shape | Config | Metal | CPU | Ratio | Status | Residual |
-|---|---|---|---|---|---|---|
-| 100×16×16 | Tiny batched | 1.6ms | 1.2ms | 1.38x | 🟠 | ✓ 9e-05 |
-| 100×16×16 | Tiny batched bf16 | 651.1µs | 1.2ms | 0.55x | 🟢 | ✗ nan |
-| 100×16×16 | Tiny batched fp16 | 368.0µs | 1.2ms | 0.30x | 💚 | ✗ nan |
-| 100×16×16 | Tiny batched fp32 | 464.6µs | 1.3ms | 0.37x | 🟢 | ~ 1e-04 |
-| 100×32×32 | Small batched | 2.6ms | 1.6ms | 1.62x | 🟠 | ~ 5e-03 |
-| 100×32×32 | Small batched bf16 | 1.4ms | 1.6ms | 0.84x | ⚪ | ✗ nan |
-| 100×32×32 | Small batched fp16 | 1.2ms | 1.6ms | 0.76x | ⚪ | ✗ nan |
-| 100×32×32 | Small batched fp32 | 1.5ms | 1.6ms | 0.92x | ⚪ | ~ 1e-04 |
-| 200×48×48 | Medium batched | 8.9ms | 4.4ms | 2.04x | 🟠 | ~ 3e-03 |
-| 200×48×48 | Medium batched bf16 | 2.2ms | 4.1ms | 0.53x | 🟢 | ✗ nan |
-| 200×48×48 | Medium batched fp16 | 2.4ms | 4.1ms | 0.59x | 🟢 | ✗ nan |
-| 200×48×48 | Medium batched fp32 | 2.4ms | 4.3ms | 0.56x | 🟢 | ~ 6e-03 |
-| 500×16×16 | Large batch tiny | 2.4ms | 5.9ms | 0.41x | 🟢 | ~ 3e-04 |
-| 500×16×16 | Large batch tiny bf16 | 672.1µs | 6.0ms | 0.11x | 💚 | ✗ nan |
-| 500×16×16 | Large batch tiny fp16 | 442.3µs | 6.1ms | 0.07x | 💚 | ✗ nan |
-| 500×16×16 | Large batch tiny fp32 | 471.4µs | 6.0ms | 0.08x | 💚 | ~ 6e-04 |
-
-## RMSNorm (metalcore) ⭐ GPU WINS
-
-*Fused RMSNorm kernel vs torch.nn.RMSNorm*
-
-| Shape | Config | Metal | CPU | Ratio | Status |
-|---|---|---|---|---|---|
-| 1024x1024 | Fwd+Bwd | 1.0ms | 947.5µs | 1.08x | ⚪ |
-| 1x4096 | Fwd+Bwd | 584.1µs | 592.1µs | 0.99x | ⚪ |
-| 1x4096 | Fwd+Bwd bf16 | 754.7µs | 703.8µs | 1.07x | ⚪ |
-| 1x4096 | Fwd+Bwd fp16 | 706.1µs | 721.3µs | 0.98x | ⚪ |
-| 1x4096 | Fwd+Bwd fp32 | 667.6µs | 579.4µs | 1.15x | ⚪ |
-| 32x4096 | Fwd+Bwd | 648.8µs | 586.3µs | 1.11x | ⚪ |
-| 32x4096 | Fwd+Bwd bf16 | 856.6µs | 789.8µs | 1.08x | ⚪ |
-| 32x4096 | Fwd+Bwd fp16 | 750.2µs | 797.7µs | 0.94x | ⚪ |
-| 32x4096 | Fwd+Bwd fp32 | 763.6µs | 753.3µs | 1.01x | ⚪ |
-| 4096x4096 | Fwd+Bwd | 3.9ms | 9.9ms | 0.40x | 🟢 |
 
 ## SVD (metalcore) ⭐ GPU WINS
 
@@ -127,6 +38,100 @@
 | 5×512×512 | Batch 5 huge | 63.6ms | 90.8ms | 0.70x | ⚪ | ~ 1e-04 |
 | 64×64 | Small square | 1.1ms | 244.3µs | 4.49x | 🔴 | ✓ 4e-06 |
 | 8192×8192 | Llama-70B attn (8192x8192) | 28.10s | 47.81s | 0.59x | 🟢 | ~ 1e-04 |
+
+## QR Batched (metalcore) ⭐ GPU WINS
+
+*Batched QR via Householder reflections*
+
+| Shape | Config | Metal | CPU | Ratio | Status | Recon Error |
+|---|---|---|---|---|---|---|
+| 1000×16×16 | Batch 1000 16x16 | 3.4ms | 51.4ms | 0.07x | 💚 | ✓ 7e-07 |
+| 100×16×16 | Batch 100 16x16 | 1.0ms | 5.1ms | 0.20x | 💚 | ✓ 2e-06 |
+| 100×32×32 | Batch 100 32x32 | 2.3ms | 5.7ms | 0.40x | 🟢 | ✓ 1e-06 |
+| 100×32×64 | Wide batch | 4.2ms | 5.9ms | 0.71x | ⚪ | ✓ 1e-06 |
+| 100×48×48 | Batch 100 48x48 | 4.9ms | 6.7ms | 0.73x | ⚪ | ✓ 1e-06 |
+| 100×64×32 | Tall batch | 2.8ms | 6.2ms | 0.45x | 🟢 | ✓ 1e-06 |
+| 100×8×8 | Batch 100 tiny | 791.8µs | 4.9ms | 0.16x | 💚 | ✓ 5e-07 |
+| 200×16×16 | Batch 200 16x16 | 1.3ms | 11.1ms | 0.12x | 💚 | ✓ 8e-07 |
+| 200×32×32 | Batch 200 32x32 | 3.0ms | 11.2ms | 0.27x | 💚 | ✓ 1e-06 |
+| 200×64×32 | Large tall batch | 4.9ms | 12.4ms | 0.40x | 🟢 | ✓ 1e-06 |
+| 500×16×16 | Batch 500 16x16 | 3.1ms | 25.7ms | 0.12x | 💚 | ✓ 7e-07 |
+| 500×32×32 | Batch 500 32x32 | 6.8ms | 28.1ms | 0.24x | 💚 | ✓ 1e-06 |
+| 500×8×8 | Batch 500 tiny | 2.1ms | 24.7ms | 0.09x | 💚 | ✓ 6e-07 |
+| 50×16×16 | ML mini-batch 16 | 971.8µs | 2.6ms | 0.38x | 🟢 | ✓ 2e-06 |
+| 50×32×32 | ML mini-batch 32 | 2.4ms | 2.8ms | 0.85x | ⚪ | ✓ 8e-07 |
+| 50×48×48 | Batch 50 48x48 | 5.0ms | 3.4ms | 1.47x | 🟠 | ✓ 1e-06 |
+| 50×8×8 | Tiny 8x8 | 714.0µs | 2.5ms | 0.29x | 💚 | ✓ 8e-07 |
+
+## Cholesky (metalcore) ⭐ GPU WINS
+
+*Batched Cholesky decomposition with MAGMA-style shared memory*
+
+| Shape | Config | Metal | CPU | Ratio | Status | Recon Error |
+|---|---|---|---|---|---|---|
+| 100×16×16 | Tiny batched | 283.5µs | 4.9ms | 0.06x | 💚 | ✓ 4e-06 |
+| 100×32×32 | Small batched | 434.2µs | 4.9ms | 0.09x | 💚 | ✓ 1e-05 |
+| 100×64×64 | Larger batched | 1.1ms | 5.0ms | 0.22x | 💚 | ✓ 2e-05 |
+| 200×48×48 | Medium batched | 1.1ms | 10.1ms | 0.10x | 💚 | ✓ 2e-05 |
+| 500×16×16 | Large batch tiny | 457.2µs | 24.2ms | 0.02x | 💚 | ✓ 4e-06 |
+
+## Linear Solve (metalcore) ⭐ GPU WINS
+
+*Fused LU decomposition with forward/back substitution*
+
+| Shape | Config | Metal | CPU | Ratio | Status | Residual |
+|---|---|---|---|---|---|---|
+| 100×16×16 | Tiny batched | 1.6ms | 1.2ms | 1.38x | 🟠 | ✓ 9e-05 |
+| 100×16×16 | Tiny batched bf16 | 651.1µs | 1.2ms | 0.55x | 🟢 | ✗ nan |
+| 100×16×16 | Tiny batched fp16 | 368.0µs | 1.2ms | 0.30x | 💚 | ✗ nan |
+| 100×16×16 | Tiny batched fp32 | 464.6µs | 1.3ms | 0.37x | 🟢 | ~ 1e-04 |
+| 100×32×32 | Small batched | 2.6ms | 1.6ms | 1.62x | 🟠 | ~ 5e-03 |
+| 100×32×32 | Small batched bf16 | 1.4ms | 1.6ms | 0.84x | ⚪ | ✗ nan |
+| 100×32×32 | Small batched fp16 | 1.2ms | 1.6ms | 0.76x | ⚪ | ✗ nan |
+| 100×32×32 | Small batched fp32 | 1.5ms | 1.6ms | 0.92x | ⚪ | ~ 1e-04 |
+| 200×48×48 | Medium batched | 8.9ms | 4.4ms | 2.04x | 🟠 | ~ 3e-03 |
+| 200×48×48 | Medium batched bf16 | 2.2ms | 4.1ms | 0.53x | 🟢 | ✗ nan |
+| 200×48×48 | Medium batched fp16 | 2.4ms | 4.1ms | 0.59x | 🟢 | ✗ nan |
+| 200×48×48 | Medium batched fp32 | 2.4ms | 4.3ms | 0.56x | 🟢 | ~ 6e-03 |
+| 500×16×16 | Large batch tiny | 2.4ms | 5.9ms | 0.41x | 🟢 | ~ 3e-04 |
+| 500×16×16 | Large batch tiny bf16 | 672.1µs | 6.0ms | 0.11x | 💚 | ✗ nan |
+| 500×16×16 | Large batch tiny fp16 | 442.3µs | 6.1ms | 0.07x | 💚 | ✗ nan |
+| 500×16×16 | Large batch tiny fp32 | 471.4µs | 6.0ms | 0.08x | 💚 | ~ 6e-04 |
+
+## RMSNorm (metalcore) ⭐ GPU WINS
+
+*Fused RMSNorm kernel vs torch.nn.RMSNorm*
+
+| Shape | Config | Metal | CPU | Ratio | Status |
+|---|---|---|---|---|---|
+| 1024x1024 | Fwd+Bwd | 1.0ms | 947.5µs | 1.08x | ⚪ |
+| 1024x1024 | Fwd+Bwd fp32 | 971.4µs | 922.7µs | 1.05x | ⚪ |
+| 1x4096 | Fwd+Bwd | 584.1µs | 592.1µs | 0.99x | ⚪ |
+| 1x4096 | Fwd+Bwd bf16 | 754.7µs | 703.8µs | 1.07x | ⚪ |
+| 1x4096 | Fwd+Bwd fp16 | 706.1µs | 721.3µs | 0.98x | ⚪ |
+| 1x4096 | Fwd+Bwd fp32 | 477.2µs | 418.9µs | 1.14x | ⚪ |
+| 32x4096 | Fwd+Bwd | 648.8µs | 586.3µs | 1.11x | ⚪ |
+| 32x4096 | Fwd+Bwd bf16 | 856.6µs | 789.8µs | 1.08x | ⚪ |
+| 32x4096 | Fwd+Bwd fp16 | 750.2µs | 797.7µs | 0.94x | ⚪ |
+| 32x4096 | Fwd+Bwd fp32 | 611.6µs | 480.1µs | 1.27x | ⚪ |
+| 4096x4096 | Fwd+Bwd | 3.9ms | 9.9ms | 0.40x | 🟢 |
+| 4096x4096 | Fwd+Bwd fp32 | 6.1ms | 8.6ms | 0.71x | ⚪ |
+
+## AdamW (metalcore) ⭐ GPU WINS
+
+*Fused AdamW optimizer step vs torch.optim.AdamW*
+
+| Params | Size | Metal | CPU | Ratio | Status |
+|---|---|---|---|---|---|
+| 10M Params | N=10485760 | 1.1ms | 3.1ms | 0.36x | 🟢 |
+| 10M Params | N=10485760 fp32 | 1.1ms | 2.9ms | 0.38x | 🟢 |
+| 16M Params | N=16777216 | 1.6ms | 4.7ms | 0.35x | 🟢 |
+| 16M Params | N=16777216 fp32 | 1.6ms | 4.5ms | 0.36x | 🟢 |
+| 1M Params | N=1048576 | 327.9µs | 592.9µs | 0.55x | 🟢 |
+| 1M Params | N=1048576 bf16 | 341.5µs | 1.0ms | 0.33x | 🟢 |
+| 1M Params | N=1048576 fp16 | 319.8µs | 1.0ms | 0.32x | 🟢 |
+| 1M Params | N=1048576 fp32 | 314.4µs | 541.0µs | 0.58x | 🟢 |
+| Params | Size | Metal | CPU | Ratio | Status |
 
 ## Eigendecomposition (metaleig)
 

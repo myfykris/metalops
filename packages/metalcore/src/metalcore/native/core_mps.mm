@@ -148,6 +148,14 @@ struct CoreKernels {
     id<MTLFunction> adamwStepScalar = nil;
     id<MTLComputePipelineState> adamwStepScalarPSO = nil;
     
+    // Optimized Training Kernels (ILP/Fusion)
+    id<MTLFunction> adamwStepIlp4 = nil;
+    id<MTLComputePipelineState> adamwStepIlp4PSO = nil;
+    id<MTLFunction> fusedAddRmsnorm = nil;
+    id<MTLComputePipelineState> fusedAddRmsnormPSO = nil;
+    id<MTLFunction> rmsnormFwdHalfVec = nil;
+    id<MTLComputePipelineState> rmsnormFwdHalfVecPSO = nil;
+    
     // Training Ops (half precision)
     id<MTLFunction> rmsnormFwdHalf = nil;
     id<MTLComputePipelineState> rmsnormFwdHalfPSO = nil;
@@ -340,7 +348,11 @@ void load_core_kernels() {
         kernels.rmsnormBwdDw = [coreLib newFunctionWithName:@"rmsnorm_bwd_dw"];
         kernels.adamwStep = [coreLib newFunctionWithName:@"adamw_step"];
         
-
+        // Optimized Training Kernels (ILP/Fusion)
+        kernels.adamwStepIlp4 = [coreLib newFunctionWithName:@"adamw_step_ilp4"];
+        kernels.fusedAddRmsnorm = [coreLib newFunctionWithName:@"fused_add_rmsnorm"];
+        kernels.rmsnormFwdHalfVec = [coreLib newFunctionWithName:@"rmsnorm_fwd_half_vec"];
+        
         
         // Create pipeline states
         if (kernels.geqr2) {
@@ -463,6 +475,17 @@ void load_core_kernels() {
         }
         if (kernels.adamwStep) {
             kernels.adamwStepPSO = [device newComputePipelineStateWithFunction:kernels.adamwStep error:&error];
+        }
+        
+        // Optimized Training Kernels PSOs
+        if (kernels.adamwStepIlp4) {
+            kernels.adamwStepIlp4PSO = [device newComputePipelineStateWithFunction:kernels.adamwStepIlp4 error:&error];
+        }
+        if (kernels.fusedAddRmsnorm) {
+            kernels.fusedAddRmsnormPSO = [device newComputePipelineStateWithFunction:kernels.fusedAddRmsnorm error:&error];
+        }
+        if (kernels.rmsnormFwdHalfVec) {
+            kernels.rmsnormFwdHalfVecPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormFwdHalfVec error:&error];
         }
         
         // Vectorized kernels
@@ -2391,31 +2414,62 @@ void adamw_step_metal(
     int64_t numel_vec = numel / 4;
     int64_t tail = numel % 4;
     
+    // Use ILP4 kernel for large tensors (>256KB = 64K float4s)
+    bool use_ilp4 = kernels.adamwStepIlp4PSO && (numel_vec >= 65536);
+    
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
         // 1. Vectorized Body (float4)
         if (numel_vec > 0) {
-            [encoder setComputePipelineState:kernels.adamwStepPSO];
-            [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*4 atIndex:0];
-            [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*4 atIndex:1];
-            [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*4 atIndex:2];
-            [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*4 atIndex:3];
-            
-            [encoder setBytes:&lr length:4 atIndex:4];
-            [encoder setBytes:&beta1 length:4 atIndex:5];
-            [encoder setBytes:&beta2 length:4 atIndex:6];
-            [encoder setBytes:&eps length:4 atIndex:7];
-            [encoder setBytes:&weight_decay length:4 atIndex:8];
-            [encoder setBytes:&correction1 length:4 atIndex:9];
-            [encoder setBytes:&correction2 length:4 atIndex:10];
-            
-            NSUInteger num_threads = (NSUInteger)numel_vec;
-            NSUInteger tg_size = std::min((NSUInteger)num_threads, (NSUInteger)256); // Tuned for occupancy
-            NSUInteger num_groups = (num_threads + tg_size - 1) / tg_size;
-            
-            [encoder dispatchThreadgroups:MTLSizeMake(num_groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+            if (use_ilp4) {
+                // ILP=4 kernel: each thread processes 4 float4 vectors
+                [encoder setComputePipelineState:kernels.adamwStepIlp4PSO];
+                [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*4 atIndex:0];
+                [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*4 atIndex:1];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*4 atIndex:2];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*4 atIndex:3];
+                
+                [encoder setBytes:&lr length:4 atIndex:4];
+                [encoder setBytes:&beta1 length:4 atIndex:5];
+                [encoder setBytes:&beta2 length:4 atIndex:6];
+                [encoder setBytes:&eps length:4 atIndex:7];
+                [encoder setBytes:&weight_decay length:4 atIndex:8];
+                [encoder setBytes:&correction1 length:4 atIndex:9];
+                [encoder setBytes:&correction2 length:4 atIndex:10];
+                uint32_t numel_u = (uint32_t)numel_vec;
+                [encoder setBytes:&numel_u length:4 atIndex:11];
+                
+                // With ILP=4, each thread processes 4 elements, so we need numel/4 threads
+                NSUInteger num_threads = (NSUInteger)((numel_vec + 3) / 4);  // Divide by ILP
+                NSUInteger tg_size = std::min((NSUInteger)256, num_threads);
+                NSUInteger num_groups = (num_threads + tg_size - 1) / tg_size;
+                
+                [encoder dispatchThreadgroups:MTLSizeMake(num_groups, 1, 1) 
+                        threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+            } else {
+                // Original kernel: one float4 per thread
+                [encoder setComputePipelineState:kernels.adamwStepPSO];
+                [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*4 atIndex:0];
+                [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*4 atIndex:1];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*4 atIndex:2];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*4 atIndex:3];
+                
+                [encoder setBytes:&lr length:4 atIndex:4];
+                [encoder setBytes:&beta1 length:4 atIndex:5];
+                [encoder setBytes:&beta2 length:4 atIndex:6];
+                [encoder setBytes:&eps length:4 atIndex:7];
+                [encoder setBytes:&weight_decay length:4 atIndex:8];
+                [encoder setBytes:&correction1 length:4 atIndex:9];
+                [encoder setBytes:&correction2 length:4 atIndex:10];
+                
+                NSUInteger num_threads = (NSUInteger)numel_vec;
+                NSUInteger tg_size = std::min((NSUInteger)num_threads, (NSUInteger)256);
+                NSUInteger num_groups = (num_threads + tg_size - 1) / tg_size;
+                
+                [encoder dispatchThreadgroups:MTLSizeMake(num_groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+            }
         }
         
         // 2. Scalar Tail (float)
