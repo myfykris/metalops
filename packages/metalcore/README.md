@@ -54,6 +54,11 @@ C = torch.randn(10, 32, 32, device=device)
 C = C @ C.mT + 1e-4 * torch.eye(32, device=device)  # Make PD
 L = metalcore.cholesky(C)
 
+# Linear Solve (batched, supports fp16/bf16)
+A = torch.randn(100, 32, 32, device=device)
+b = torch.randn(100, 32, device=device)
+x = metalcore.solve(A, b)  # x such that A @ x = b
+
 # Training Ops
 from metalcore import MetalRMSNorm, MetalAdamW, metal_gelu
 
@@ -72,18 +77,24 @@ y = metal_gelu(x)
 
 ## Performance Highlights
 
-| Operation | Speedup vs PyTorch |
-|-----------|-------------------|
-| RMSNorm (4096x4096) | **2.5x** |
-| AdamW (16M params) | **2.9x** |
-| SiLU (256x1024) | **4x** |
-| QR Batched (500x16x16) | **20x** |
+| Operation | Speedup vs PyTorch/CPU |
+|-----------|------------------------|
+| Cholesky Batched | **10x faster** |
+| Solve Batched | **5-10x faster** |
+| QR Batched | **20x faster** |
+| RMSNorm | **2.5x faster** |
+| AdamW | **2.9x faster** |
+| SiLU/GELU | **2-4x faster** |
 
 ## Requirements
 
 - macOS 12.0+ with Apple Silicon (M1/M2/M3/M4)
 - Python 3.9+
 - PyTorch 2.0+
+
+## Author
+
+[Kris Bailey](https://github.com/myfykris)
 
 ## License
 
