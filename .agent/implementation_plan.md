@@ -8,7 +8,7 @@
 - Fused Q.T @ b for solve (single command buffer)
 - MAGMA-style shared memory Cholesky
 
-### Training Ops (v0.1.5)
+### Training Ops (v0.1.7)
 - Vectorized float4 GELU/SiLU (2-4x bandwidth improvement)
 - SIMD reductions for RMSNorm (simd_sum, simd_max)
 - Fused single-kernel AdamW step

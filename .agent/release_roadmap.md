@@ -1,9 +1,9 @@
 # Release Roadmap
 
-## Current: metalcore 0.1.5
+## Current: metalcore 0.1.7
 All LA + training ops consolidated into single package.
 
-### Included in 0.1.5
+### Included in 0.1.7
 - ✅ SVD, QR, Cholesky, Eigh, TRSM, Solve
 - ✅ RMSNorm (2.5x faster)
 - ✅ AdamW (2.9x faster)

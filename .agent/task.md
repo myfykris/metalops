@@ -16,7 +16,7 @@
 - [x] TRSM (triangular solve)
 - [x] Solve (LU-based batched, fp16/bf16 supported)
 
-### Training Ops ✅ (v0.1.5)
+### Training Ops ✅ (v0.1.7)
 - [x] RMSNorm (2.5x faster, vectorized SIMD)
 - [x] AdamW (2.9x faster, fused single-kernel)
 - [x] GELU/SiLU (4x faster, float4 vectorized)
@@ -29,7 +29,7 @@
 - [x] Runtime tracking saved to benchmark_history.jsonl
 
 ## Current Version
-- metalcore v0.1.6
+- metalcore v0.1.7
 - Tested on Python 3.9, 3.10, 3.11, 3.12, 3.13, 3.14
 
 ## Future Work
