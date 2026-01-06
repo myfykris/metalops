@@ -2382,6 +2382,64 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_bwd_metal(torch::Tensor dY, tor
 }
 
 // -----------------------------------------------------------------------------
+// Fused Add + RMSNorm (saves memory round-trip)
+// -----------------------------------------------------------------------------
+
+std::tuple<torch::Tensor, torch::Tensor> fused_add_rmsnorm_metal(
+    torch::Tensor input,    // [B, N] - overwritten with output
+    torch::Tensor residual, // [B, N] - updated in-place
+    torch::Tensor W,        // [N]
+    float eps
+) {
+    load_core_kernels();
+    
+    TORCH_CHECK(input.device().type() == at::kMPS, "input must be on MPS device");
+    TORCH_CHECK(input.dim() == 2, "input must be 2D (B, N)");
+    TORCH_CHECK(residual.dim() == 2, "residual must be 2D (B, N)");
+    
+    int64_t B = input.size(0);
+    int64_t N = input.size(1);
+    
+    // Ensure contiguous
+    auto input_c = input.contiguous();
+    auto residual_c = residual.contiguous();
+    auto W_c = W.contiguous();
+    
+    auto Rstd = torch::empty({B}, input.options().dtype(at::kFloat));
+    
+    if (!kernels.fusedAddRmsnormPSO) {
+        // Fallback: do it manually
+        residual_c.add_(input_c);
+        auto var = residual_c.pow(2).mean(-1, true);
+        auto rstd_exp = torch::rsqrt(var + eps);
+        input_c.copy_(residual_c * rstd_exp * W_c);
+        return std::make_tuple(input_c, Rstd);
+    }
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.fusedAddRmsnormPSO];
+        [encoder setBuffer:getMTLBufferStorage(input_c) offset:input_c.storage_offset() * 4 atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(residual_c) offset:residual_c.storage_offset() * 4 atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(W_c) offset:W_c.storage_offset() * 4 atIndex:2];
+        [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3];
+        uint32_t N_u = (uint32_t)N;
+        [encoder setBytes:&N_u length:4 atIndex:4];
+        [encoder setBytes:&eps length:4 atIndex:5];
+        
+        NSUInteger threads = std::min((NSUInteger)N, (NSUInteger)1024);
+        [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    return std::make_tuple(input_c, Rstd);
+}
+
+// -----------------------------------------------------------------------------
 // AdamW
 // -----------------------------------------------------------------------------
 
@@ -3134,6 +3192,7 @@ PYBIND11_MODULE(metalcore_backend, m) {
     m.def("rmsnorm_fwd", &rmsnorm_fwd_metal, "RMSNorm Forward");
     m.def("rmsnorm_bwd", &rmsnorm_bwd_metal, "RMSNorm Backward");
     m.def("adamw_step", &adamw_step_metal, "AdamW Step");
+    m.def("fused_add_rmsnorm", &fused_add_rmsnorm_metal, "Fused Add + RMSNorm");
     
     // Activations
     m.def("gelu_fwd", &gelu_fwd_metal, "GELU Forward");

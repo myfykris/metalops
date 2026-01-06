@@ -1,6 +1,6 @@
 # Metalops Benchmark Results
 
-*Generated: 2026-01-05 21:16:37*
+*Generated: 2026-01-05 21:34:03*
 
 **Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | ⚪ Close | 🟠 CPU wins | 🔴 CPU wins big (>3x)
 
@@ -105,17 +105,17 @@
 | Shape | Config | Metal | CPU | Ratio | Status |
 |---|---|---|---|---|---|
 | 1024x1024 | Fwd+Bwd | 1.0ms | 947.5µs | 1.08x | ⚪ |
-| 1024x1024 | Fwd+Bwd fp32 | 971.4µs | 922.7µs | 1.05x | ⚪ |
+| 1024x1024 | Fwd+Bwd fp32 | 949.8µs | 915.3µs | 1.04x | ⚪ |
 | 1x4096 | Fwd+Bwd | 584.1µs | 592.1µs | 0.99x | ⚪ |
 | 1x4096 | Fwd+Bwd bf16 | 754.7µs | 703.8µs | 1.07x | ⚪ |
 | 1x4096 | Fwd+Bwd fp16 | 706.1µs | 721.3µs | 0.98x | ⚪ |
-| 1x4096 | Fwd+Bwd fp32 | 477.2µs | 418.9µs | 1.14x | ⚪ |
+| 1x4096 | Fwd+Bwd fp32 | 599.8µs | 437.1µs | 1.37x | 🟠 |
 | 32x4096 | Fwd+Bwd | 648.8µs | 586.3µs | 1.11x | ⚪ |
 | 32x4096 | Fwd+Bwd bf16 | 856.6µs | 789.8µs | 1.08x | ⚪ |
 | 32x4096 | Fwd+Bwd fp16 | 750.2µs | 797.7µs | 0.94x | ⚪ |
-| 32x4096 | Fwd+Bwd fp32 | 611.6µs | 480.1µs | 1.27x | ⚪ |
+| 32x4096 | Fwd+Bwd fp32 | 611.8µs | 499.0µs | 1.23x | ⚪ |
 | 4096x4096 | Fwd+Bwd | 3.9ms | 9.9ms | 0.40x | 🟢 |
-| 4096x4096 | Fwd+Bwd fp32 | 6.1ms | 8.6ms | 0.71x | ⚪ |
+| 4096x4096 | Fwd+Bwd fp32 | 6.2ms | 8.7ms | 0.71x | ⚪ |
 
 ## AdamW (metalcore) ⭐ GPU WINS
 
@@ -130,7 +130,7 @@
 | 1M Params | N=1048576 | 327.9µs | 592.9µs | 0.55x | 🟢 |
 | 1M Params | N=1048576 bf16 | 341.5µs | 1.0ms | 0.33x | 🟢 |
 | 1M Params | N=1048576 fp16 | 319.8µs | 1.0ms | 0.32x | 🟢 |
-| 1M Params | N=1048576 fp32 | 314.4µs | 541.0µs | 0.58x | 🟢 |
+| 1M Params | N=1048576 fp32 | 262.7µs | 510.6µs | 0.51x | 🟢 |
 | Params | Size | Metal | CPU | Ratio | Status |
 
 ## Eigendecomposition (metaleig)

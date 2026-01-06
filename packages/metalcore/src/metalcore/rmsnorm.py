@@ -65,3 +65,47 @@ class MetalRMSNorm(nn.Module):
 
     def forward(self, x):
         return RMSNormFunction.apply(x, self.weight, self.eps)
+
+
+def fused_add_rmsnorm(input, residual, weight, eps=1e-6):
+    """Fused Add + RMSNorm: residual = input + residual; output = rmsnorm(residual)
+    
+    Saves one memory round-trip compared to separate operations.
+    Modifies residual in-place.
+    
+    Args:
+        input: [B, N] tensor to add to residual
+        residual: [B, N] tensor, modified in-place
+        weight: [N] RMSNorm weight
+        eps: epsilon for numerical stability
+        
+    Returns:
+        tuple of (normalized_output, rstd)
+    """
+    if not input.is_mps or metalcore_backend is None:
+        # Fallback
+        residual.add_(input)
+        var = residual.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        rstd = torch.rsqrt(var + eps)
+        output = residual * rstd.to(residual.dtype) * weight
+        return output, rstd.squeeze(-1)
+    
+    return metalcore_backend.fused_add_rmsnorm(input, residual, weight, eps)
+
+
+class FusedAddRMSNorm(nn.Module):
+    """Module wrapper for fused add + RMSNorm.
+    
+    Usage in transformer blocks:
+        hidden = self.fused_norm(attn_output, residual)
+        # residual is updated in-place
+    """
+    def __init__(self, hidden_size, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, input, residual):
+        """Returns normalized output. Updates residual in-place."""
+        output, _ = fused_add_rmsnorm(input, residual, self.weight, self.eps)
+        return output

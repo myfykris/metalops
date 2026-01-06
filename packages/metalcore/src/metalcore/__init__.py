@@ -24,7 +24,7 @@ from .solve import solve
 from .cholesky import cholesky, cholesky_solve
 from .svd import svd
 from .eigh import eigh
-from .rmsnorm import RMSNormFunction, MetalRMSNorm
+from .rmsnorm import RMSNormFunction, MetalRMSNorm, fused_add_rmsnorm, FusedAddRMSNorm
 from .optim import MetalAdamW
 from .activations import metal_gelu, metal_silu, MetalGELU, MetalSiLU
 from .sdpa import metal_scaled_dot_product_attention
@@ -102,6 +102,8 @@ __all__ = [
     # Training Ops
     "RMSNormFunction",
     "MetalRMSNorm",
+    "fused_add_rmsnorm",
+    "FusedAddRMSNorm",
     "MetalAdamW",
     # Activations
     "metal_gelu",
