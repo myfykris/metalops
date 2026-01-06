@@ -3213,3 +3213,121 @@ kernel void trace_batched_kernel(
         traces[batch_idx] = shared[0];
     }
 }
+
+// =============================================================================
+// Fused Linear Solve (LU decomposition + forward/back substitution)
+// Solves Ax = b for x, where A is (N, N) and b is (N, K)
+// =============================================================================
+
+kernel void solve_batched_kernel(
+    device float* A [[buffer(0)]],              // (B, N, N) - destroyed, becomes LU
+    device float* b [[buffer(1)]],              // (B, N, K) - destroyed, becomes x
+    device int* pivots [[buffer(2)]],           // (B, N) - temp storage for pivots
+    constant uint& N [[buffer(3)]],
+    constant uint& K [[buffer(4)]],             // number of RHS columns
+    constant uint& batch_size [[buffer(5)]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tg_size [[threads_per_threadgroup]]
+) {
+    if (batch_idx >= batch_size) return;
+    
+    device float* A_batch = A + batch_idx * N * N;
+    device float* b_batch = b + batch_idx * N * K;
+    device int* piv = pivots + batch_idx * N;
+    
+    // =========================================================================
+    // Step 1: LU Decomposition with Partial Pivoting (Doolittle's method)
+    // =========================================================================
+    
+    // Initialize pivots
+    for (uint i = tid; i < N; i += tg_size) {
+        piv[i] = (int)i;
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    
+    for (uint k = 0; k < N; k++) {
+        // Find pivot (thread 0 only)
+        if (tid == 0) {
+            uint max_row = k;
+            float max_val = fabs(A_batch[k * N + k]);
+            for (uint i = k + 1; i < N; i++) {
+                float val = fabs(A_batch[i * N + k]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = i;
+                }
+            }
+            
+            // Swap rows in A and b if needed
+            if (max_row != k) {
+                piv[k] = (int)max_row;
+                
+                // Swap in A
+                for (uint j = 0; j < N; j++) {
+                    float tmp = A_batch[k * N + j];
+                    A_batch[k * N + j] = A_batch[max_row * N + j];
+                    A_batch[max_row * N + j] = tmp;
+                }
+                
+                // Swap in b (all K columns)
+                for (uint c = 0; c < K; c++) {
+                    float tmp = b_batch[k * K + c];
+                    b_batch[k * K + c] = b_batch[max_row * K + c];
+                    b_batch[max_row * K + c] = tmp;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+        
+        // Compute multipliers and update
+        float pivot_val = A_batch[k * N + k];
+        if (fabs(pivot_val) < 1e-10f) continue;  // Singular
+        
+        for (uint i = k + 1 + tid; i < N; i += tg_size) {
+            float mult = A_batch[i * N + k] / pivot_val;
+            A_batch[i * N + k] = mult;  // Store L below diagonal
+            
+            for (uint j = k + 1; j < N; j++) {
+                A_batch[i * N + j] -= mult * A_batch[k * N + j];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+    }
+    
+    // =========================================================================
+    // Step 2: Forward Substitution (solve Ly = b)
+    // L is unit lower triangular (diagonal = 1, stored below diagonal of A)
+    // =========================================================================
+    
+    // Note: b has already been permuted during LU
+    // We solve column by column of b
+    for (uint col = tid; col < K; col += tg_size) {
+        for (uint i = 1; i < N; i++) {
+            float sum = 0.0f;
+            for (uint j = 0; j < i; j++) {
+                sum += A_batch[i * N + j] * b_batch[j * K + col];
+            }
+            b_batch[i * K + col] -= sum;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    
+    // =========================================================================
+    // Step 3: Back Substitution (solve Ux = y)
+    // U is upper triangular (including diagonal of A)
+    // =========================================================================
+    
+    for (uint col = tid; col < K; col += tg_size) {
+        for (int i = (int)N - 1; i >= 0; i--) {
+            float sum = 0.0f;
+            for (uint j = (uint)i + 1; j < N; j++) {
+                sum += A_batch[i * N + j] * b_batch[j * K + col];
+            }
+            float diag = A_batch[i * N + i];
+            if (fabs(diag) > 1e-10f) {
+                b_batch[i * K + col] = (b_batch[i * K + col] - sum) / diag;
+            }
+        }
+    }
+}

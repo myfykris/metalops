@@ -5,8 +5,6 @@ using namespace metal;
 // RMSNorm Kernels
 // -----------------------------------------------------------------------------
 
-constant float EPSILON = 1e-5;
-
 // Forward Pass:
 // y = x * w * rsqrt(mean(x^2) + eps)
 // One threadgroup per row (B rows).
@@ -264,6 +262,210 @@ kernel void adamw_step(
     
     // Write back
     params[id] = p;
+    exp_avg[id] = m;
+    exp_avg_sq[id] = v;
+}
+
+// =============================================================================
+// HALF PRECISION (fp16) VARIANTS
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// RMSNorm Half Precision
+// Note: Accumulation is done in float for numerical stability
+// -----------------------------------------------------------------------------
+
+kernel void rmsnorm_fwd_half(
+    device const half* X [[buffer(0)]],
+    device const half* W [[buffer(1)]],
+    device half* Y [[buffer(2)]],
+    device float* Rstd [[buffer(3)]], // Keep rstd in float for backward
+    constant uint& N [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 threadsPerThreadgroup [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint tid_x = tid.x;
+    uint offset = row * N;
+    
+    // Accumulate in float for stability
+    float sum_sq = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float val = float(X[offset + i]);
+        sum_sq += val * val;
+    }
+    
+    float simd_sum_sq = simd_sum(sum_sq);
+    threadgroup float shared_sums[32];
+    
+    if (simd_lane_id == 0) {
+        shared_sums[simd_group_id] = simd_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float total_sum_sq = 0.0f;
+    if (simd_group_id == 0) {
+        uint num_simd_groups = (threadsPerThreadgroup.x + 31) / 32;
+        float partial = 0.0f;
+        if (simd_lane_id < num_simd_groups) {
+            partial = shared_sums[simd_lane_id];
+        }
+        total_sum_sq = simd_sum(partial);
+    }
+    
+    if (simd_group_id == 0 && simd_lane_id == 0) {
+        shared_sums[0] = total_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    total_sum_sq = shared_sums[0];
+    
+    float rstd = rsqrt(total_sum_sq / float(N) + eps);
+    
+    if (tid_x == 0) {
+        Rstd[row] = rstd;
+    }
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float val = float(X[offset + i]);
+        float w = float(W[i]);
+        Y[offset + i] = half(val * rstd * w);
+    }
+}
+
+kernel void rmsnorm_bwd_dx_half(
+    device const half* dY [[buffer(0)]],
+    device const half* X [[buffer(1)]],
+    device const float* Rstd [[buffer(2)]],
+    device const half* W [[buffer(3)]],
+    device half* dX [[buffer(4)]],
+    constant uint& N [[buffer(5)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 threadsPerThreadgroup [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    float rstd = Rstd[row];
+    float sum_dy_w_x = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float dy = float(dY[offset + i]);
+        float x_val = float(X[offset + i]);
+        float w = float(W[i]);
+        sum_dy_w_x += dy * w * x_val;
+    }
+    
+    float simd_sum_val = simd_sum(sum_dy_w_x);
+    threadgroup float shared_sums[32];
+    
+    if (simd_lane_id == 0) {
+        shared_sums[simd_group_id] = simd_sum_val;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float total_sum = 0.0f;
+    if (simd_group_id == 0) {
+        uint num_simd_groups = (threadsPerThreadgroup.x + 31) / 32;
+        float partial = 0.0f;
+        if (simd_lane_id < num_simd_groups) {
+            partial = shared_sums[simd_lane_id];
+        }
+        total_sum = simd_sum(partial);
+    }
+    
+    if (simd_group_id == 0 && simd_lane_id == 0) {
+        shared_sums[0] = total_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    total_sum = shared_sums[0];
+    
+    float term2_coeff = total_sum * rstd * rstd * rstd / float(N);
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float dy = float(dY[offset + i]);
+        float x_val = float(X[offset + i]);
+        float w = float(W[i]);
+        
+        float term1 = dy * w * rstd;
+        float term2 = x_val * term2_coeff;
+        
+        dX[offset + i] = half(term1 - term2);
+    }
+}
+
+kernel void rmsnorm_bwd_dw_half(
+    device const half* dY [[buffer(0)]],
+    device const half* X [[buffer(1)]],
+    device const float* Rstd [[buffer(2)]],
+    device half* dW [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant uint& B [[buffer(5)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= N) return;
+    
+    float sum_val = 0.0f;
+    
+    for (uint row = 0; row < B; ++row) {
+        float r = Rstd[row];
+        uint offset = row * N + id;
+        sum_val += float(dY[offset]) * float(X[offset]) * r;
+    }
+    
+    dW[id] = half(sum_val);
+}
+
+// -----------------------------------------------------------------------------
+// AdamW Half Precision
+// Note: Optimizer state (exp_avg, exp_avg_sq) kept in float for stability
+// -----------------------------------------------------------------------------
+
+kernel void adamw_step_half(
+    device half4* params [[buffer(0)]],
+    device const half4* grads [[buffer(1)]],
+    device float4* exp_avg [[buffer(2)]],   // Keep in float32
+    device float4* exp_avg_sq [[buffer(3)]],// Keep in float32
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    uint id [[thread_position_in_grid]]
+) {
+    // Load params and grads, convert to float for computation
+    float4 p = float4(params[id]);
+    float4 g = float4(grads[id]);
+    float4 m = exp_avg[id];
+    float4 v = exp_avg_sq[id];
+    
+    // Weight decay (decoupled)
+    p = p - lr * weight_decay * p;
+    
+    // Update moments (in float)
+    m = beta1 * m + (1.0f - beta1) * g;
+    v = beta2 * v + (1.0f - beta2) * (g * g);
+    
+    // Bias correction
+    float4 m_hat = m / bias_correction1;
+    float4 v_hat = v / bias_correction2;
+    
+    // Update param
+    float4 denom = sqrt(v_hat) + eps;
+    p = p - lr * (m_hat / denom);
+    
+    // Write back (params in half, state in float)
+    params[id] = half4(p);
     exp_avg[id] = m;
     exp_avg_sq[id] = v;
 }

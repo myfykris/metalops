@@ -120,6 +120,9 @@ struct CoreKernels {
     
     id<MTLFunction> traceBatched = nil;
     id<MTLComputePipelineState> traceBatchedPSO = nil;
+    
+    id<MTLFunction> solveBatched = nil;
+    id<MTLComputePipelineState> solveBatchedPSO = nil;
 
     // Training Ops (RMSNorm, AdamW)
     id<MTLFunction> rmsnormFwd = nil;
@@ -145,7 +148,17 @@ struct CoreKernels {
     id<MTLFunction> adamwStepScalar = nil;
     id<MTLComputePipelineState> adamwStepScalarPSO = nil;
     
-    // Activation Kernels
+    // Training Ops (half precision)
+    id<MTLFunction> rmsnormFwdHalf = nil;
+    id<MTLComputePipelineState> rmsnormFwdHalfPSO = nil;
+    id<MTLFunction> rmsnormBwdDxHalf = nil;
+    id<MTLComputePipelineState> rmsnormBwdDxHalfPSO = nil;
+    id<MTLFunction> rmsnormBwdDwHalf = nil;
+    id<MTLComputePipelineState> rmsnormBwdDwHalfPSO = nil;
+    id<MTLFunction> adamwStepHalf = nil;
+    id<MTLComputePipelineState> adamwStepHalfPSO = nil;
+    
+    // Activation Kernels (float)
     id<MTLFunction> geluFwd = nil;
     id<MTLComputePipelineState> geluFwdPSO = nil;
     id<MTLFunction> geluBwd = nil;
@@ -162,6 +175,24 @@ struct CoreKernels {
     id<MTLComputePipelineState> geluFwdScalarPSO = nil;
     id<MTLFunction> siluFwdScalar = nil;
     id<MTLComputePipelineState> siluFwdScalarPSO = nil;
+    
+    // Activation Kernels (half precision)
+    id<MTLFunction> geluFwdHalf = nil;
+    id<MTLComputePipelineState> geluFwdHalfPSO = nil;
+    id<MTLFunction> geluBwdHalf = nil;
+    id<MTLComputePipelineState> geluBwdHalfPSO = nil;
+    id<MTLFunction> siluFwdHalf = nil;
+    id<MTLComputePipelineState> siluFwdHalfPSO = nil;
+    id<MTLFunction> siluBwdHalf = nil;
+    id<MTLComputePipelineState> siluBwdHalfPSO = nil;
+    id<MTLFunction> biasGeluFwdHalf = nil;
+    id<MTLComputePipelineState> biasGeluFwdHalfPSO = nil;
+    id<MTLFunction> biasSiluFwdHalf = nil;
+    id<MTLComputePipelineState> biasSiluFwdHalfPSO = nil;
+    id<MTLFunction> geluFwdScalarHalf = nil;
+    id<MTLComputePipelineState> geluFwdScalarHalfPSO = nil;
+    id<MTLFunction> siluFwdScalarHalf = nil;
+    id<MTLComputePipelineState> siluFwdScalarHalfPSO = nil;
     
     // SDPA
     id<MTLFunction> attentionNaive = nil;
@@ -301,6 +332,7 @@ void load_core_kernels() {
         kernels.frobeniusNormBatched = [coreLib newFunctionWithName:@"frobenius_norm_batched_kernel"];
         kernels.softmaxBatched = [coreLib newFunctionWithName:@"softmax_batched_kernel"];
         kernels.traceBatched = [coreLib newFunctionWithName:@"trace_batched_kernel"];
+        kernels.solveBatched = [coreLib newFunctionWithName:@"solve_batched_kernel"];
         
         // Training Ops
         kernels.rmsnormFwd = [coreLib newFunctionWithName:@"rmsnorm_fwd"];
@@ -415,6 +447,10 @@ void load_core_kernels() {
             kernels.traceBatchedPSO = [device newComputePipelineStateWithFunction:kernels.traceBatched error:&error];
             if (!kernels.traceBatchedPSO) printf("Failed to create traceBatchedPSO: %s\n", [[error localizedDescription] UTF8String]);
         }
+        if (kernels.solveBatched) {
+            kernels.solveBatchedPSO = [device newComputePipelineStateWithFunction:kernels.solveBatched error:&error];
+            if (!kernels.solveBatchedPSO) printf("Failed to create solveBatchedPSO: %s\n", [[error localizedDescription] UTF8String]);
+        }
         
         if (kernels.rmsnormFwd) {
             kernels.rmsnormFwdPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormFwd error:&error];
@@ -450,6 +486,17 @@ void load_core_kernels() {
              kernels.adamwStepScalarPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepScalar error:&error];
         }
         
+        // Training Ops (half precision)
+        kernels.rmsnormFwdHalf = [coreLib newFunctionWithName:@"rmsnorm_fwd_half"];
+        kernels.rmsnormBwdDxHalf = [coreLib newFunctionWithName:@"rmsnorm_bwd_dx_half"];
+        kernels.rmsnormBwdDwHalf = [coreLib newFunctionWithName:@"rmsnorm_bwd_dw_half"];
+        kernels.adamwStepHalf = [coreLib newFunctionWithName:@"adamw_step_half"];
+        
+        if (kernels.rmsnormFwdHalf) kernels.rmsnormFwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormFwdHalf error:&error];
+        if (kernels.rmsnormBwdDxHalf) kernels.rmsnormBwdDxHalfPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDxHalf error:&error];
+        if (kernels.rmsnormBwdDwHalf) kernels.rmsnormBwdDwHalfPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDwHalf error:&error];
+        if (kernels.adamwStepHalf) kernels.adamwStepHalfPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepHalf error:&error];
+        
         // Activation Kernels
         kernels.geluFwd = [coreLib newFunctionWithName:@"gelu_fwd"];
         kernels.geluBwd = [coreLib newFunctionWithName:@"gelu_bwd"];
@@ -468,6 +515,25 @@ void load_core_kernels() {
         if (kernels.biasSiluFwd) kernels.biasSiluFwdPSO = [device newComputePipelineStateWithFunction:kernels.biasSiluFwd error:&error];
         if (kernels.geluFwdScalar) kernels.geluFwdScalarPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdScalar error:&error];
         if (kernels.siluFwdScalar) kernels.siluFwdScalarPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdScalar error:&error];
+        
+        // Activation Kernels (half precision)
+        kernels.geluFwdHalf = [coreLib newFunctionWithName:@"gelu_fwd_half"];
+        kernels.geluBwdHalf = [coreLib newFunctionWithName:@"gelu_bwd_half"];
+        kernels.siluFwdHalf = [coreLib newFunctionWithName:@"silu_fwd_half"];
+        kernels.siluBwdHalf = [coreLib newFunctionWithName:@"silu_bwd_half"];
+        kernels.biasGeluFwdHalf = [coreLib newFunctionWithName:@"bias_gelu_fwd_half"];
+        kernels.biasSiluFwdHalf = [coreLib newFunctionWithName:@"bias_silu_fwd_half"];
+        kernels.geluFwdScalarHalf = [coreLib newFunctionWithName:@"gelu_fwd_scalar_half"];
+        kernels.siluFwdScalarHalf = [coreLib newFunctionWithName:@"silu_fwd_scalar_half"];
+        
+        if (kernels.geluFwdHalf) kernels.geluFwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdHalf error:&error];
+        if (kernels.geluBwdHalf) kernels.geluBwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.geluBwdHalf error:&error];
+        if (kernels.siluFwdHalf) kernels.siluFwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdHalf error:&error];
+        if (kernels.siluBwdHalf) kernels.siluBwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.siluBwdHalf error:&error];
+        if (kernels.biasGeluFwdHalf) kernels.biasGeluFwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.biasGeluFwdHalf error:&error];
+        if (kernels.biasSiluFwdHalf) kernels.biasSiluFwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.biasSiluFwdHalf error:&error];
+        if (kernels.geluFwdScalarHalf) kernels.geluFwdScalarHalfPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdScalarHalf error:&error];
+        if (kernels.siluFwdScalarHalf) kernels.siluFwdScalarHalfPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdScalarHalf error:&error];
         
         // SDPA
         kernels.attentionNaive = [coreLib newFunctionWithName:@"attention_naive"];
@@ -2136,47 +2202,55 @@ std::vector<torch::Tensor> eigh_forward(torch::Tensor A) {
 std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torch::Tensor W, float eps) {
     load_core_kernels();
     
-    // Checks...
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS");
     TORCH_CHECK(W.device().type() == at::kMPS, "W must be on MPS");
     
-    int64_t B = X.size(0);
-    int64_t N = X.size(1);
+    // Handle bf16 by promoting to fp32
+    bool is_bf16 = X.scalar_type() == at::kBFloat16;
+    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
+    torch::Tensor W_compute = is_bf16 ? W.to(at::kFloat) : W;
+    bool is_half = X_compute.scalar_type() == at::kHalf;
     
-    auto Y = torch::empty_like(X);
-    auto Rstd = torch::empty({B}, X.options());
+    int64_t B = X_compute.size(0);
+    int64_t N = X_compute.size(1);
+    int64_t elem_size = is_half ? 2 : 4;
     
-    // Check for vectorization: N divisible by 4, contiguous, aligned offsets
-    bool use_vec4 = kernels.rmsnormFwdVec4PSO && 
+    auto Y = torch::empty_like(X_compute);
+    // Rstd always in float for numerical stability
+    auto Rstd = torch::empty({B}, X_compute.options().dtype(at::kFloat));
+    
+    // Select kernel based on dtype
+    id<MTLComputePipelineState> pso = is_half ? kernels.rmsnormFwdHalfPSO : kernels.rmsnormFwdPSO;
+    id<MTLComputePipelineState> pso_vec4 = is_half ? nil : kernels.rmsnormFwdVec4PSO; // No vec4 half kernel yet
+    
+    // Check for vectorization (float only for now)
+    bool use_vec4 = pso_vec4 && !is_half &&
                     (N % 4 == 0) && 
-                    X.is_contiguous() && W.is_contiguous() && 
-                    (X.storage_offset() % 4 == 0) && 
-                    (W.storage_offset() % 4 == 0);
+                    X_compute.is_contiguous() && W_compute.is_contiguous() && 
+                    (X_compute.storage_offset() % 4 == 0) && 
+                    (W_compute.storage_offset() % 4 == 0);
 
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
         if (use_vec4) {
-             [encoder setComputePipelineState:kernels.rmsnormFwdVec4PSO];
-             // N/4 threads covers the width
-             // Tune: Use 256 threads to increase work-per-thread and improve occupancy vs 1024
+             [encoder setComputePipelineState:pso_vec4];
              NSUInteger threads = std::min((NSUInteger)(N / 4), (NSUInteger)256);
-             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
-             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * 4 atIndex:1];
-             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:2];
-             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3];
+             [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(W_compute) offset:W_compute.storage_offset() * elem_size atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3]; // Rstd always float
              uint32_t N_u = (uint32_t)N;
              [encoder setBytes:&N_u length:4 atIndex:4];
              [encoder setBytes:&eps length:4 atIndex:5];
              [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
-        } else {
-             // Scalar Path
-             [encoder setComputePipelineState:kernels.rmsnormFwdPSO];
-             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
-             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * 4 atIndex:1];
-             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:2];
-             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3];
+        } else if (pso) {
+             [encoder setComputePipelineState:pso];
+             [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(W_compute) offset:W_compute.storage_offset() * elem_size atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3]; // Rstd always float
              uint32_t N_u = (uint32_t)N;
              [encoder setBytes:&N_u length:4 atIndex:4];
              [encoder setBytes:&eps length:4 atIndex:5];
@@ -2188,6 +2262,10 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
+    // Convert back if bf16
+    if (is_bf16) {
+        return std::make_tuple(Y.to(at::kBFloat16), Rstd);
+    }
     return std::make_tuple(Y, Rstd);
 }
 
@@ -2505,12 +2583,23 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
     
-    auto Y = torch::empty_like(X);
-    int64_t numel = X.numel();
+    // Handle bf16 by promoting to fp32 (Metal doesn't support native bfloat16)
+    bool is_bf16 = X.scalar_type() == at::kBFloat16;
+    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
+    bool is_half = X_compute.scalar_type() == at::kHalf;
     
-    if (!kernels.geluFwdPSO) {
+    auto Y = torch::empty_like(X_compute);
+    int64_t numel = X_compute.numel();
+    int64_t elem_size = is_half ? 2 : 4;  // bytes per element
+    
+    // Select appropriate kernel PSO based on dtype
+    id<MTLComputePipelineState> vecPSO = is_half ? kernels.geluFwdHalfPSO : kernels.geluFwdPSO;
+    id<MTLComputePipelineState> scalarPSO = is_half ? kernels.geluFwdScalarHalfPSO : kernels.geluFwdScalarPSO;
+    
+    if (!vecPSO) {
         // CPU fallback
-        return torch::gelu(X);
+        auto result = torch::gelu(X_compute);
+        return is_bf16 ? result.to(at::kBFloat16) : result;
     }
     
     int64_t numel_vec = numel / 4;
@@ -2521,9 +2610,9 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
         if (numel_vec > 0) {
-            [encoder setComputePipelineState:kernels.geluFwdPSO];
-            [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
-            [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:1];
+            [encoder setComputePipelineState:vecPSO];
+            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:1];
             uint32_t numel_u = (uint32_t)numel;
             [encoder setBytes:&numel_u length:4 atIndex:2];
             
@@ -2533,11 +2622,11 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
             [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         }
         
-        if (tail > 0 && kernels.geluFwdScalarPSO) {
-            [encoder setComputePipelineState:kernels.geluFwdScalarPSO];
-            int64_t offset = numel_vec * 4 * 4; // bytes
-            [encoder setBuffer:getMTLBufferStorage(X) offset:(X.storage_offset() * 4 + offset) atIndex:0];
-            [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * 4 + offset) atIndex:1];
+        if (tail > 0 && scalarPSO) {
+            [encoder setComputePipelineState:scalarPSO];
+            int64_t offset = numel_vec * 4 * elem_size; // bytes
+            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:(X_compute.storage_offset() * elem_size + offset) atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * elem_size + offset) atIndex:1];
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         }
         
@@ -2545,7 +2634,7 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return Y;
+    return is_bf16 ? Y.to(at::kBFloat16) : Y;
 }
 
 torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
@@ -2554,29 +2643,38 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     TORCH_CHECK(dY.device().type() == at::kMPS, "dY must be on MPS device");
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     
-    auto dX = torch::empty_like(X);
-    int64_t numel = X.numel();
+    // Handle bf16 by promoting to fp32
+    bool is_bf16 = X.scalar_type() == at::kBFloat16;
+    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
+    torch::Tensor dY_compute = is_bf16 ? dY.to(at::kFloat) : dY;
+    bool is_half = X_compute.scalar_type() == at::kHalf;
     
-    if (!kernels.geluBwdPSO) {
+    auto dX = torch::empty_like(X_compute);
+    int64_t numel = X_compute.numel();
+    int64_t elem_size = is_half ? 2 : 4;
+    
+    id<MTLComputePipelineState> pso = is_half ? kernels.geluBwdHalfPSO : kernels.geluBwdPSO;
+    
+    if (!pso) {
         // CPU fallback via autograd
-        auto X_cpu = X.cpu().requires_grad_(true);
+        auto X_cpu = X_compute.cpu().requires_grad_(true);
         auto Y_cpu = torch::gelu(X_cpu);
-        Y_cpu.backward(dY.cpu());
-        return X_cpu.grad().to(X.device());
+        Y_cpu.backward(dY_compute.cpu());
+        auto result = X_cpu.grad().to(X.device());
+        return is_bf16 ? result.to(at::kBFloat16) : result;
     }
     
     int64_t numel_vec = numel / 4;
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        // Ensure any prior encode operations are committed before creating a new encoder
         stream->synchronize(SyncType::COMMIT);
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
-        [encoder setComputePipelineState:kernels.geluBwdPSO];
-        [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
-        [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
-        [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * 4 atIndex:2];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:getMTLBufferStorage(dY_compute) offset:dY_compute.storage_offset() * elem_size atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * elem_size atIndex:2];
         uint32_t numel_u = (uint32_t)numel;
         [encoder setBytes:&numel_u length:4 atIndex:3];
         
@@ -2589,7 +2687,7 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return dX;
+    return is_bf16 ? dX.to(at::kBFloat16) : dX;
 }
 
 torch::Tensor silu_fwd_metal(torch::Tensor X) {
@@ -2598,11 +2696,21 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
     
-    auto Y = torch::empty_like(X);
-    int64_t numel = X.numel();
+    // Handle bf16 by promoting to fp32
+    bool is_bf16 = X.scalar_type() == at::kBFloat16;
+    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
+    bool is_half = X_compute.scalar_type() == at::kHalf;
     
-    if (!kernels.siluFwdPSO) {
-        return torch::silu(X);
+    auto Y = torch::empty_like(X_compute);
+    int64_t numel = X_compute.numel();
+    int64_t elem_size = is_half ? 2 : 4;
+    
+    id<MTLComputePipelineState> vecPSO = is_half ? kernels.siluFwdHalfPSO : kernels.siluFwdPSO;
+    id<MTLComputePipelineState> scalarPSO = is_half ? kernels.siluFwdScalarHalfPSO : kernels.siluFwdScalarPSO;
+    
+    if (!vecPSO) {
+        auto result = torch::silu(X_compute);
+        return is_bf16 ? result.to(at::kBFloat16) : result;
     }
     
     int64_t numel_vec = numel / 4;
@@ -2613,9 +2721,9 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
         if (numel_vec > 0) {
-            [encoder setComputePipelineState:kernels.siluFwdPSO];
-            [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:0];
-            [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * 4 atIndex:1];
+            [encoder setComputePipelineState:vecPSO];
+            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:1];
             uint32_t numel_u = (uint32_t)numel;
             [encoder setBytes:&numel_u length:4 atIndex:2];
             
@@ -2625,11 +2733,11 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
             [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         }
         
-        if (tail > 0 && kernels.siluFwdScalarPSO) {
-            [encoder setComputePipelineState:kernels.siluFwdScalarPSO];
-            int64_t offset = numel_vec * 4 * 4;
-            [encoder setBuffer:getMTLBufferStorage(X) offset:(X.storage_offset() * 4 + offset) atIndex:0];
-            [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * 4 + offset) atIndex:1];
+        if (tail > 0 && scalarPSO) {
+            [encoder setComputePipelineState:scalarPSO];
+            int64_t offset = numel_vec * 4 * elem_size;
+            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:(X_compute.storage_offset() * elem_size + offset) atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * elem_size + offset) atIndex:1];
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         }
         
@@ -2637,7 +2745,7 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return Y;
+    return is_bf16 ? Y.to(at::kBFloat16) : Y;
 }
 
 torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
@@ -2646,14 +2754,24 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     TORCH_CHECK(dY.device().type() == at::kMPS, "dY must be on MPS device");
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     
-    auto dX = torch::empty_like(X);
-    int64_t numel = X.numel();
+    // Handle bf16 by promoting to fp32
+    bool is_bf16 = X.scalar_type() == at::kBFloat16;
+    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
+    torch::Tensor dY_compute = is_bf16 ? dY.to(at::kFloat) : dY;
+    bool is_half = X_compute.scalar_type() == at::kHalf;
     
-    if (!kernels.siluBwdPSO) {
-        auto X_cpu = X.cpu().requires_grad_(true);
+    auto dX = torch::empty_like(X_compute);
+    int64_t numel = X_compute.numel();
+    int64_t elem_size = is_half ? 2 : 4;
+    
+    id<MTLComputePipelineState> pso = is_half ? kernels.siluBwdHalfPSO : kernels.siluBwdPSO;
+    
+    if (!pso) {
+        auto X_cpu = X_compute.cpu().requires_grad_(true);
         auto Y_cpu = torch::silu(X_cpu);
-        Y_cpu.backward(dY.cpu());
-        return X_cpu.grad().to(X.device());
+        Y_cpu.backward(dY_compute.cpu());
+        auto result = X_cpu.grad().to(X.device());
+        return is_bf16 ? result.to(at::kBFloat16) : result;
     }
     
     int64_t numel_vec = numel / 4;
@@ -2663,10 +2781,10 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT);
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
-        [encoder setComputePipelineState:kernels.siluBwdPSO];
-        [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * 4 atIndex:0];
-        [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * 4 atIndex:1];
-        [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * 4 atIndex:2];
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:getMTLBufferStorage(dY_compute) offset:dY_compute.storage_offset() * elem_size atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * elem_size atIndex:2];
         uint32_t numel_u = (uint32_t)numel;
         [encoder setBytes:&numel_u length:4 atIndex:3];
         
@@ -2679,7 +2797,7 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return dX;
+    return is_bf16 ? dX.to(at::kBFloat16) : dX;
 }
 
 // -----------------------------------------------------------------------------
@@ -2846,6 +2964,105 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sdpa_bwd_metal(
     return {dQ, dK, dV};
 }
 
+// -----------------------------------------------------------------------------
+// Fused Linear Solve
+// -----------------------------------------------------------------------------
+
+torch::Tensor solve_metal(torch::Tensor A, torch::Tensor b) {
+    load_core_kernels();
+    
+    TORCH_CHECK(A.device().type() == at::kMPS, "A must be on MPS device");
+    TORCH_CHECK(b.device().type() == at::kMPS, "b must be on MPS device");
+    TORCH_CHECK(A.dim() >= 2, "A must be at least 2D");
+    TORCH_CHECK(b.dim() >= 1, "b must be at least 1D");
+    
+    // Promote fp16/bf16 to fp32 for numerical stability in LU factorization
+    auto input_dtype = A.scalar_type();
+    bool need_conversion = (input_dtype == at::kHalf || input_dtype == at::kBFloat16);
+    
+    torch::Tensor A_in = need_conversion ? A.to(at::kFloat) : A;
+    torch::Tensor b_in = need_conversion ? b.to(at::kFloat) : b;
+    
+    // Handle batched and non-batched cases
+    bool batched = A_in.dim() == 3;
+    int64_t batch_size = batched ? A_in.size(0) : 1;
+    int64_t N = batched ? A_in.size(1) : A_in.size(0);
+    TORCH_CHECK((batched ? A_in.size(2) : A_in.size(1)) == N, "A must be square");
+    
+    // b can be (N,), (N, K), (B, N), or (B, N, K)
+    int64_t K = 1;
+    if (b_in.dim() == 1) {
+        K = 1;
+    } else if (b_in.dim() == 2) {
+        K = batched ? 1 : b_in.size(1);
+    } else if (b_in.dim() == 3) {
+        K = b_in.size(2);
+    }
+    
+    // Reshape inputs for kernel: (B, N, N) and (B, N, K)
+    auto A_work = A_in.clone().contiguous();
+    auto x = b_in.clone().contiguous();
+    
+    if (!batched) {
+        A_work = A_work.unsqueeze(0);
+        x = x.view({1, N, K});
+    } else if (b_in.dim() == 2) {
+        x = x.unsqueeze(-1);
+    }
+    
+    // Allocate pivot storage
+    auto pivots = torch::empty({batch_size, N}, A_in.options().dtype(at::kInt));
+    
+    if (!kernels.solveBatchedPSO) {
+        // CPU fallback
+        auto A_cpu = A_work.squeeze(0).cpu();
+        auto b_cpu = x.squeeze(0).squeeze(-1).cpu();
+        auto result = std::get<0>(torch::linalg_solve_ex(A_cpu, b_cpu));
+        auto out = result.to(A.device());
+        return need_conversion ? out.to(input_dtype) : out;
+    }
+    
+    @autoreleasepool {
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.solveBatchedPSO];
+        [encoder setBuffer:getMTLBufferStorage(A_work) offset:A_work.storage_offset() * 4 atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(x) offset:x.storage_offset() * 4 atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(pivots) offset:pivots.storage_offset() * 4 atIndex:2];
+        
+        uint32_t N_u = (uint32_t)N;
+        uint32_t K_u = (uint32_t)K;
+        uint32_t batch_u = (uint32_t)batch_size;
+        [encoder setBytes:&N_u length:4 atIndex:3];
+        [encoder setBytes:&K_u length:4 atIndex:4];
+        [encoder setBytes:&batch_u length:4 atIndex:5];
+        
+        NSUInteger tg_size = std::min((NSUInteger)N, (NSUInteger)256);
+        [encoder dispatchThreadgroups:MTLSizeMake(batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+        
+        [encoder endEncoding];
+        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+    }
+    
+    // Reshape output to match input shape
+    torch::Tensor result;
+    if (!batched) {
+        if (b.dim() == 1) {
+            result = x.view({N});
+        } else {
+            result = x.squeeze(0);
+        }
+    } else if (b.dim() == 2) {
+        result = x.squeeze(-1);
+    } else {
+        result = x;
+    }
+    
+    // Convert back to original dtype if needed
+    return need_conversion ? result.to(input_dtype) : result;
+}
+
 PYBIND11_MODULE(metalcore_backend, m) {
     m.def("trsm", &trsm_metal, "Triangular Solve (TRSM)");
     m.def("geqr2", &geqr2_metal, "Panel Householder QR");
@@ -2857,6 +3074,7 @@ PYBIND11_MODULE(metalcore_backend, m) {
     m.def("trsm_batched", &trsm_batched_metal, "Batched TRSM");
     m.def("cholesky_batched", &cholesky_batched_metal, "Batched Cholesky");
     m.def("cholesky_solve_batched", &cholesky_solve_batched_metal, "Batched Cholesky Solve");
+    m.def("solve", &solve_metal, "Linear Solve (LU-based)");
     
     // Training ops
     m.def("rmsnorm_fwd", &rmsnorm_fwd_metal, "RMSNorm Forward");
@@ -2872,5 +3090,18 @@ PYBIND11_MODULE(metalcore_backend, m) {
     // SDPA
     m.def("sdpa_fwd", &sdpa_fwd_metal, "Scaled Dot Product Attention Forward");
     m.def("sdpa_bwd", &sdpa_bwd_metal, "Scaled Dot Product Attention Backward");
+    
+    // Eigendecomposition
+    m.def("eigh_forward", &eigh_forward, "Symmetric Eigenvalue Decomposition");
+    
+    // SVD support
+    m.def("column_norm_sort", &column_norm_sort_metal, "Column Norm Sort for SVD");
+    m.def("svd_forward", &svd_forward, "Batched SVD Forward");
+    m.def("sign_canonicalize", &sign_canonicalize_metal, "Sign Canonicalize for SVD");
+    m.def("syrk_batched", &syrk_batched_metal, "Batched SYRK for Gram matrix");
+    m.def("frobenius_norm_batched", &frobenius_norm_batched_metal, "Batched Frobenius Norm");
+    m.def("softmax_batched", &softmax_batched_metal, "Batched Softmax");
+    m.def("trace_batched", &trace_batched_metal, "Batched Trace");
+    m.def("lu_batched", &lu_batched_metal, "Batched LU Decomposition");
 }
 

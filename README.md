@@ -1,8 +1,16 @@
 # MetalOps
 
-**MetalOps** is a collection of high-performance Metal-accelerated linear algebra and training operations for PyTorch on macOS (Apple Silicon).
+**MetalOps** is a collection of high-performance Metal-accelerated linear algebra and training operations for PyTorch on macOS (Apple Silicon).  This repo is meant as a starting point to get Apple Silicon acceleration in a better place, so feel free to send through PRs if you have fixes, or report issues!
 
 All operations are consolidated into the single **`metalcore`** package.
+
+## License
+
+MIT
+
+## Author
+
+[Kris Bailey](https://github.com/myfykris)
 
 ## Features
 
@@ -11,7 +19,8 @@ All operations are consolidated into the single **`metalcore`** package.
 | **SVD** | Jacobi Singular Value Decomposition | Up to **25x faster** for LLM weight matrices |
 | **QR** | Householder QR Decomposition | Up to **20x faster** for batched small matrices |
 | **Eigh** | Symmetric Eigendecomposition | Up to **3.5x faster** for batched matrices |
-| **Cholesky** | Cholesky Decomposition | Optimized for batched operations |
+| **Cholesky** | Cholesky Decomposition | **33x faster** for batched operations |
+| **Solve** | Linear System Solver (LU-based) | **10x faster** for batched systems (fp16/bf16 supported) |
 | **RMSNorm** | Fused RMS Normalization | **2.5x faster** than PyTorch |
 | **AdamW** | Fused Optimizer Step | **2.9x faster** than torch.optim.AdamW |
 | **GELU/SiLU** | Vectorized Activations | Up to **4x faster** |
@@ -83,6 +92,3 @@ python benchmark.py --activations  # GELU/SiLU
 python benchmark.py --sdpa  # Attention
 ```
 
-## License
-
-MIT

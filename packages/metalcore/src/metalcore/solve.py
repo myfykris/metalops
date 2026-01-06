@@ -65,13 +65,9 @@ def solve(A: torch.Tensor, b: torch.Tensor, *, fast: bool = False) -> torch.Tens
     batch_size = A.shape[0] if is_batched or A.dim() == 3 else 1
     
     # Smart routing:
-    # - Batched with small N (≤ 48): GPU QR is fast
-    # - Otherwise: CPU LU is faster
-    use_gpu = (
-        batch_size > 1 and 
-        HAS_BACKEND and 
-        N <= 48
-    )
+    # - Batched: Use fused GPU LU-solve for all sizes
+    # - Single: CPU LU is faster due to LAPACK optimization
+    use_gpu = batch_size > 1 and HAS_BACKEND
     
     if use_gpu:
         x = _solve_batched_gpu(A, b)
@@ -92,9 +88,9 @@ def solve(A: torch.Tensor, b: torch.Tensor, *, fast: bool = False) -> torch.Tens
 
 
 def _solve_batched_gpu(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """GPU-accelerated batched solve using fused C++ (QR + Q.T@b + TRSM in single cmdBuffer)."""
-    # Use fused C++ function for maximum performance
-    return mc.solve_batched(A, b)
+    """GPU-accelerated batched solve using fused LU decomposition."""
+    # Use fused LU-based solve kernel for maximum performance
+    return mc.solve(A, b)
 
 
 def _solve_batched_cpu(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

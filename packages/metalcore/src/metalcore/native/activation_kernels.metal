@@ -182,3 +182,171 @@ kernel void silu_fwd_scalar(
     float sigmoid_x = 1.0f / (1.0f + exp(-x));
     Y[id] = x * sigmoid_x;
 }
+
+// =============================================================================
+// HALF PRECISION (fp16) VARIANTS
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// GELU Half Precision
+// -----------------------------------------------------------------------------
+
+kernel void gelu_fwd_half(
+    device const half4* X [[buffer(0)]],
+    device half4* Y [[buffer(1)]],
+    constant uint& numel [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    half4 x = X[id];
+    
+    const half sqrt_2_over_pi = 0.7978845608h;
+    const half coeff = 0.044715h;
+    
+    half4 x3 = x * x * x;
+    half4 arg = sqrt_2_over_pi * (x + coeff * x3);
+    half4 tanh_val = tanh(arg);
+    
+    Y[id] = x * 0.5h * (1.0h + tanh_val);
+}
+
+kernel void gelu_bwd_half(
+    device const half4* dY [[buffer(0)]],
+    device const half4* X [[buffer(1)]],
+    device half4* dX [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    half4 x = X[id];
+    half4 dy = dY[id];
+    
+    const half sqrt_2_over_pi = 0.7978845608h;
+    const half coeff = 0.044715h;
+    
+    half4 x2 = x * x;
+    half4 x3 = x2 * x;
+    half4 arg = sqrt_2_over_pi * (x + coeff * x3);
+    half4 tanh_val = tanh(arg);
+    half4 sech2_val = 1.0h - tanh_val * tanh_val;
+    
+    half4 darg_dx = sqrt_2_over_pi * (1.0h + 3.0h * coeff * x2);
+    half4 grad = 0.5h * (1.0h + tanh_val) + 0.5h * x * sech2_val * darg_dx;
+    
+    dX[id] = dy * grad;
+}
+
+// -----------------------------------------------------------------------------
+// SiLU Half Precision
+// -----------------------------------------------------------------------------
+
+kernel void silu_fwd_half(
+    device const half4* X [[buffer(0)]],
+    device half4* Y [[buffer(1)]],
+    constant uint& numel [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    half4 x = X[id];
+    half4 sigmoid_x = 1.0h / (1.0h + exp(-x));
+    Y[id] = x * sigmoid_x;
+}
+
+kernel void silu_bwd_half(
+    device const half4* dY [[buffer(0)]],
+    device const half4* X [[buffer(1)]],
+    device half4* dX [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    half4 x = X[id];
+    half4 dy = dY[id];
+    
+    half4 sigmoid_x = 1.0h / (1.0h + exp(-x));
+    half4 grad = sigmoid_x * (1.0h + x * (1.0h - sigmoid_x));
+    
+    dX[id] = dy * grad;
+}
+
+// -----------------------------------------------------------------------------
+// Bias + GELU/SiLU Fusion Half Precision
+// -----------------------------------------------------------------------------
+
+kernel void bias_gelu_fwd_half(
+    device const half4* X [[buffer(0)]],
+    device const half4* Bias [[buffer(1)]],
+    device half4* Y [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    constant uint& bias_size [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    uint bias_idx = id % bias_size;
+    half4 x = X[id] + Bias[bias_idx];
+    
+    const half sqrt_2_over_pi = 0.7978845608h;
+    const half coeff = 0.044715h;
+    
+    half4 x3 = x * x * x;
+    half4 arg = sqrt_2_over_pi * (x + coeff * x3);
+    half4 tanh_val = tanh(arg);
+    
+    Y[id] = x * 0.5h * (1.0h + tanh_val);
+}
+
+kernel void bias_silu_fwd_half(
+    device const half4* X [[buffer(0)]],
+    device const half4* Bias [[buffer(1)]],
+    device half4* Y [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    constant uint& bias_size [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    uint bias_idx = id % bias_size;
+    half4 x = X[id] + Bias[bias_idx];
+    
+    half4 sigmoid_x = 1.0h / (1.0h + exp(-x));
+    Y[id] = x * sigmoid_x;
+}
+
+// -----------------------------------------------------------------------------
+// Scalar Fallbacks Half Precision
+// -----------------------------------------------------------------------------
+
+kernel void gelu_fwd_scalar_half(
+    device const half* X [[buffer(0)]],
+    device half* Y [[buffer(1)]],
+    uint id [[thread_position_in_grid]]
+) {
+    half x = X[id];
+    const half sqrt_2_over_pi = 0.7978845608h;
+    const half coeff = 0.044715h;
+    half x3 = x * x * x;
+    half arg = sqrt_2_over_pi * (x + coeff * x3);
+    half tanh_val = tanh(arg);
+    Y[id] = x * 0.5h * (1.0h + tanh_val);
+}
+
+kernel void silu_fwd_scalar_half(
+    device const half* X [[buffer(0)]],
+    device half* Y [[buffer(1)]],
+    uint id [[thread_position_in_grid]]
+) {
+    half x = X[id];
+    half sigmoid_x = 1.0h / (1.0h + exp(-x));
+    Y[id] = x * sigmoid_x;
+}

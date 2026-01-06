@@ -15,7 +15,7 @@ Foundational Metal Linear Algebra Primitives for PyTorch on Apple Silicon.
 - **Cholesky (`cholesky`)**: MAGMA-style shared memory optimization for Positive Definite matrices.
 
 ### 2. Solvers
-- **Linear Solve (`solve`)**: Batched linear system solver using QR factorization and triangular solve.
+- **Linear Solve (`solve`)**: Batched linear system solver using LU factorization. Supports fp16/bf16 (auto-promoted to fp32 for stability).
 - **Triangular Solve (`trsm`)**: Solve $AX=B$ where $A$ is triangular.
 
 ### 3. Training Ops ⚡ NEW

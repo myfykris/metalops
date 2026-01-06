@@ -24,6 +24,9 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description="Metalops Unified Benchmark")
 parser.add_argument("--lite", action="store_true", help="Quick validation (1 iteration, skip file write)")
 parser.add_argument("--quick", action="store_true", help="Reduced benchmark (fewer iterations)")
+parser.add_argument("--nolongops", action="store_true", help="Skip slow benchmarks (models, pipeline, SVD, EIGH)")
+parser.add_argument("--dtype", choices=["fp32", "fp16", "bf16", "all"], default="fp32",
+                    help="Dtype to benchmark (fp32, fp16, bf16, or all)")
 # Test-specific flags
 parser.add_argument("--svd", action="store_true", help="Run only SVD benchmarks")
 parser.add_argument("--qr", action="store_true", help="Run only QR benchmarks")
@@ -43,9 +46,18 @@ args = parser.parse_args()
 # Benchmark mode globals
 LITE_MODE = args.lite  # Quick validation: 1 iter, minimal configs, no file write
 QUICK_MODE = args.quick or args.lite  # Fewer iterations
+SKIP_LONG_OPS = args.nolongops  # Skip slow benchmarks (SVD, EIGH, models, pipeline)
+
+# Dtype configuration
+DTYPE_MAP = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+if args.dtype == "all":
+    BENCHMARK_DTYPES = [("fp32", torch.float32), ("fp16", torch.float16), ("bf16", torch.bfloat16)]
+else:
+    BENCHMARK_DTYPES = [(args.dtype, DTYPE_MAP[args.dtype])]
 
 # Test selection (if none specified, run all)
 RUN_ALL = not any([args.svd, args.qr, args.eigh, args.cholesky, args.solve, args.models, args.pipeline, args.rmsnorm, args.adamw, args.training, args.activations, args.sdpa])
+# All ops run, but SKIP_LONG_OPS filters large configs within each op
 RUN_SVD = args.svd or RUN_ALL
 RUN_QR = args.qr or RUN_ALL
 RUN_EIGH = args.eigh or RUN_ALL
@@ -55,8 +67,8 @@ RUN_RMSNORM = args.rmsnorm or args.training or RUN_ALL
 RUN_ADAMW = args.adamw or args.training or RUN_ALL
 RUN_ACTIVATIONS = args.activations or RUN_ALL
 RUN_SDPA = args.sdpa or RUN_ALL
-RUN_MODELS = args.models or (RUN_ALL and not LITE_MODE)  # Skip models in lite
-RUN_PIPELINE = args.pipeline or (RUN_ALL and not LITE_MODE)  # Skip pipeline in lite
+RUN_MODELS = args.models or (RUN_ALL and not LITE_MODE and not SKIP_LONG_OPS)  # Skip models entirely in nolongops
+RUN_PIPELINE = args.pipeline or (RUN_ALL and not LITE_MODE and not SKIP_LONG_OPS)  # Skip pipeline entirely in nolongops
 
 # Add package paths (metalcore uses installed package for full functionality)
 sys.path.insert(0, str(Path(__file__).parent / "packages/metalsvd/src"))
@@ -101,6 +113,244 @@ def format_accuracy(err):
         return f"~ {err:.0e}"
     else:
         return f"✗ {err:.0e}"
+
+def load_benchmarks_json(filepath):
+    """Load benchmark data from JSON file."""
+    if not filepath.exists():
+        return {"metadata": {}, "sections": {}}
+    with open(filepath, 'r') as f:
+        return json.load(f)
+
+def save_benchmarks_json(filepath, data):
+    """Save benchmark data to JSON file."""
+    data['metadata']['last_updated'] = datetime.datetime.now().isoformat()
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def update_benchmark_row(data, section_title, row_key, row_values, raw_values=None):
+    """
+    Update a single row in the benchmark data.
+    Moves current to history and sets new current.
+    raw_values: dict with numeric values for charting (e.g., {'metal_ms': 1.5, 'cpu_ms': 3.0, 'ratio': 0.5})
+    """
+    if section_title not in data['sections']:
+        data['sections'][section_title] = {'description': None, 'headers': [], 'rows': {}}
+    
+    section = data['sections'][section_title]
+    
+    # Initialize row if not exists
+    if row_key not in section['rows']:
+        section['rows'][row_key] = {'current': None, 'history': []}
+    
+    row = section['rows'][row_key]
+    
+    # Move current to history (if exists)
+    if row['current'] is not None:
+        history_entry = {
+            'timestamp': data['metadata'].get('last_updated', datetime.datetime.now().isoformat()),
+            'values': row['current'],
+            'raw': row.get('current_raw', {})
+        }
+        row['history'].append(history_entry)
+        # Keep only last 50 historical entries
+        if len(row['history']) > 50:
+            row['history'] = row['history'][-50:]
+    
+    # Set new current
+    row['current'] = row_values
+    if raw_values:
+        row['current_raw'] = raw_values
+
+def generate_markdown_from_json(data):
+    """Generate benchmarks.md content from JSON data."""
+    lines = ["# Metalops Benchmark Results", ""]
+    
+    if 'last_updated' in data.get('metadata', {}):
+        lines.append(f"*Last updated: {data['metadata']['last_updated']}*")
+        lines.append("")
+    
+    # Calculate average ratio for each section for dynamic sorting
+    def get_section_avg_ratio(section_title):
+        """Get average ratio for a section. Lower = GPU wins = should appear first."""
+        if section_title not in data.get('sections', {}):
+            return float('inf')  # Non-existent sections at end
+        
+        section = data['sections'][section_title]
+        ratios = []
+        for row_key, row_data in section.get('rows', {}).items():
+            raw = row_data.get('raw_values', {})
+            if 'ratio' in raw:
+                ratios.append(raw['ratio'])
+            elif row_data.get('current'):
+                # Try to extract ratio from formatted current values (e.g., "0.38x")
+                for val in row_data['current']:
+                    if isinstance(val, str) and val.endswith('x') and val[:-1].replace('.', '').isdigit():
+                        try:
+                            ratios.append(float(val[:-1]))
+                            break
+                        except ValueError:
+                            pass
+        
+        if not ratios:
+            # No ratio data - use section title hints
+            if "GPU WINS" in section_title:
+                return 0.5  # Favor GPU WINS sections
+            elif "Recommendations" in section_title:
+                return 1000  # Always last
+            return 50  # Neutral
+        
+        return sum(ratios) / len(ratios)
+    
+    # Get all sections and sort by average ratio (GPU wins first)
+    all_sections = list(data.get('sections', {}).keys())
+    sorted_sections = sorted(all_sections, key=get_section_avg_ratio)
+    
+    for section_title in sorted_sections:
+        section = data['sections'][section_title]
+        
+        lines.append(f"## {section_title}")
+        lines.append("")
+        
+        if section.get('description'):
+            lines.append(f"*{section['description']}*")
+            lines.append("")
+        
+        if section.get('headers') and section.get('rows'):
+            lines.append("| " + " | ".join(section['headers']) + " |")
+            lines.append("|" + "|".join(["---"] * len(section['headers'])) + "|")
+            
+            # Sort rows by key for consistent ordering
+            for row_key in sorted(section['rows'].keys()):
+                row_data = section['rows'][row_key]
+                if row_data.get('current'):
+                    lines.append("| " + " | ".join(str(x) for x in row_data['current']) + " |")
+            lines.append("")
+    
+    return "\n".join(lines)
+
+# Legacy function for backwards compatibility
+def parse_existing_benchmarks(filepath):
+    """Parse existing benchmarks.md file and return sections as a dict."""
+    if not filepath.exists():
+        return {}
+    
+    with open(filepath, 'r') as f:
+        content = f.read()
+    
+    sections = {}
+    current_section = None
+    current_lines = []
+    
+    for line in content.split('\n'):
+        if line.startswith('## '):
+            # Save previous section
+            if current_section:
+                sections[current_section] = '\n'.join(current_lines)
+            # Start new section
+            current_section = line[3:].strip()
+            current_lines = [line]
+        elif current_section:
+            current_lines.append(line)
+    
+    # Save last section
+    if current_section:
+        sections[current_section] = '\n'.join(current_lines)
+    
+    return sections
+
+
+
+def merge_benchmark_sections(new_results, existing_sections, ran_benchmarks):
+    """
+    Merge new benchmark results with existing sections.
+    Now merges at the ROW level within sections, preserving rows that weren't re-run.
+    """
+    merged = {}
+    
+    # First, add all existing sections
+    for title, content in existing_sections.items():
+        merged[title] = content
+    
+    # Then, update with new results for sections that were run
+    for section in new_results.sections:
+        title = section['title']
+        
+        # Only modify if this benchmark was actually run
+        if title not in ran_benchmarks and 'Usage Recommendations' not in title:
+            continue
+        
+        # Parse existing rows from this section if it exists
+        existing_rows = {}
+        if title in existing_sections:
+            lines = existing_sections[title].split('\n')
+            for line in lines:
+                if line.startswith('|') and '---' not in line and not line.startswith('| Shape') and not line.startswith('| Config') and not line.startswith('| Name') and not line.startswith('| Op'):
+                    # Parse row - use first two columns as key for uniqueness
+                    parts = [p.strip() for p in line.strip('|').split('|')]
+                    if len(parts) >= 2:
+                        # Key is first two columns (config identifier)
+                        key = (parts[0].strip(), parts[1].strip())
+                        existing_rows[key] = line
+        
+        # Build new rows, preserving existing ones not re-run
+        new_rows = {}
+        for row in section['rows']:
+            if len(row) >= 2:
+                key = (str(row[0]).strip(), str(row[1]).strip())
+                new_rows[key] = row
+        
+        # Merge: new rows override existing, but preserve non-overlapping existing rows
+        final_rows = dict(existing_rows)  # Start with existing
+        for key, row in new_rows.items():
+            # Convert row list to table line
+            final_rows[key] = "| " + " | ".join(str(x) for x in row) + " |"
+        
+        # Generate merged section markdown
+        lines = [f"## {title}", ""]
+        if section['description']:
+            lines.append(f"*{section['description']}*")
+            lines.append("")
+        lines.append("| " + " | ".join(section['headers']) + " |")
+        lines.append("|" + "|".join(["---"] * len(section['headers'])) + "|")
+        
+        # Add rows in a sensible order (by key)
+        for key in sorted(final_rows.keys()):
+            lines.append(final_rows[key])
+        lines.append("")
+        
+        merged[title] = '\n'.join(lines)
+    
+    return merged
+
+
+# Define the canonical order for benchmark sections
+# Order: GPU wins first, then mixed/neutral, then poor performers at end
+SECTION_ORDER = [
+    # GPU Winners (⭐)
+    "SVD (metalcore) ⭐ GPU WINS",
+    "QR Batched (metalcore) ⭐ GPU WINS",
+    "Cholesky (metalcore) ⭐ GPU WINS",
+    "Linear Solve (metalcore) ⭐ GPU WINS",
+    "RMSNorm (metalcore) ⭐ GPU WINS",
+    "AdamW (metalcore) ⭐ GPU WINS",
+    "Pipeline Operations ⭐ GPU WINS (No Transfer)",
+    # LLM Model Benchmarks
+    "LLM: Llama",
+    "LLM: Mistral",
+    "LLM: Qwen",
+    "LLM: Gemma",
+    "LLM: Phi",
+    # Mixed/Neutral performance
+    "Activations (metalcore)",
+    "Eigendecomposition (metaleig)",
+    "SVD (metalsvd)",
+    # Poor performers (CPU wins) - at end
+    "QR Single Matrix (metalcore)",
+    "SDPA (metalcore)",
+    # Recommendations last
+    "Usage Recommendations",
+]
+
 
 class BenchmarkResults:
     def __init__(self):
@@ -303,6 +553,10 @@ def benchmark_svd():
     ]
     
     for M, N, batch, desc in configs:
+        # Skip large configs when --nolongops is set (matrices > 512x512 or LLM-sized)
+        if SKIP_LONG_OPS and (M > 512 or N > 512 or M * N > 512 * 512):
+            continue
+        
         if batch == 1:
             A = torch.randn(M, N, device=device)
         else:
@@ -370,7 +624,7 @@ def benchmark_qr_single():
     results = []
     
     try:
-        import metalcore_backend as mc
+        import metalcore
     except ImportError:
         print("  metalcore not available, skipping")
         return results
@@ -396,11 +650,15 @@ def benchmark_qr_single():
     ]
     
     for M, N, desc in configs:
+        # Skip large configs when --nolongops is set
+        if SKIP_LONG_OPS and (M > 512 or N > 512):
+            continue
+        
         A = torch.randn(M, N, device=device)
         
         # Warmup
         try:
-            Q, R = mc.qr(A, 32)
+            Q, R = metalcore.qr(A)
             torch.mps.synchronize()
         except Exception as e:
             print(f"  {desc}: Error - {e}")
@@ -416,11 +674,14 @@ def benchmark_qr_single():
         else:
             iters = 3
         
+        if LITE_MODE:
+            iters = 1
+        
         # Metal timing
         torch.mps.synchronize()
         start = time.time()
         for _ in range(iters):
-            Q, R = mc.qr(A, 32)
+            Q, R = metalcore.qr(A)
         torch.mps.synchronize()
         metal_time = (time.time() - start) / iters * 1000
         
@@ -608,7 +869,7 @@ def benchmark_cholesky():
 
 
 def benchmark_solve():
-    """Benchmark linear solve (batched QR-based)."""
+    """Benchmark linear solve (fused LU-based)."""
     print("Benchmarking SOLVE...")
     results = []
     
@@ -626,50 +887,54 @@ def benchmark_solve():
         (200, 48, "Medium batched"),
     ]
     
-    for batch, N, desc in configs:
-        A = torch.randn(batch, N, N, device=device)
-        b = torch.randn(batch, N, device=device)
-        
-        # Warmup
-        try:
-            x = mc.solve(A, b)
+    iters = 1 if LITE_MODE else 10
+    
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for batch, N, desc in configs:
+            A = torch.randn(batch, N, N, device=device, dtype=dtype)
+            b = torch.randn(batch, N, device=device, dtype=dtype)
+            
+            # Warmup
+            try:
+                x = mc.solve(A.clone(), b.clone())
+                torch.mps.synchronize()
+            except Exception as e:
+                print(f"  {desc} {dtype_name}: Error - {e}")
+                continue
+            
+            # Metal timing
             torch.mps.synchronize()
-        except Exception as e:
-            print(f"  {desc}: Error - {e}")
-            continue
-        
-        iters = 10
-        
-        # Metal timing
-        torch.mps.synchronize()
-        start = time.time()
-        for _ in range(iters):
-            x = mc.solve(A, b)
-        torch.mps.synchronize()
-        metal_time = (time.time() - start) / iters * 1000
-        
-        # Accuracy (residual)
-        residual = A @ x.unsqueeze(-1) - b.unsqueeze(-1)
-        err = torch.max(torch.abs(residual)).item()
-        
-        # CPU timing
-        A_cpu, b_cpu = A.cpu(), b.cpu()
-        start = time.time()
-        for _ in range(iters):
-            for i in range(batch):
-                torch.linalg.solve(A_cpu[i], b_cpu[i])
-        cpu_time = (time.time() - start) / iters * 1000
-        
-        ratio = metal_time / cpu_time
-        shape = f"{batch}×{N}×{N}"
-        
-        results.append([
-            shape, desc,
-            format_time(metal_time), format_time(cpu_time),
-            f"{ratio:.2f}x", color_ratio(ratio),
-            format_accuracy(err)
-        ])
-        print(f"  {desc}: {ratio:.2f}x")
+            start = time.time()
+            for _ in range(iters):
+                x = mc.solve(A.clone(), b.clone())
+            torch.mps.synchronize()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            # Accuracy (residual) - compute in float for consistency
+            A_f = A.float() if dtype != torch.float32 else A
+            x_f = x.float() if dtype != torch.float32 else x
+            b_f = b.float() if dtype != torch.float32 else b
+            residual = A_f @ x_f.unsqueeze(-1) - b_f.unsqueeze(-1)
+            err = torch.max(torch.abs(residual)).item()
+            
+            # CPU timing (always fp32 for fair comparison)
+            A_cpu, b_cpu = A.float().cpu(), b.float().cpu()
+            start = time.time()
+            for _ in range(iters):
+                for i in range(batch):
+                    torch.linalg.solve(A_cpu[i], b_cpu[i])
+            cpu_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / cpu_time
+            shape = f"{batch}×{N}×{N}"
+            
+            results.append([
+                shape, f"{desc} {dtype_name}",
+                format_time(metal_time), format_time(cpu_time),
+                f"{ratio:.2f}x", color_ratio(ratio),
+                format_accuracy(err)
+            ])
+            print(f"  {desc} {dtype_name}: {ratio:.2f}x")
     
     return results
 
@@ -704,6 +969,10 @@ def benchmark_eigh():
     ]
     
     for N, batch, desc in configs:
+        # Skip large configs when --nolongops is set (matrices > 256x256)
+        if SKIP_LONG_OPS and N > 256:
+            continue
+        
         # Create symmetric matrix
         if batch == 1:
             A = torch.randn(N, N, device=device)
@@ -872,60 +1141,61 @@ def benchmark_rmsnorm():
     ]
     if LITE_MODE:
         configs = [(32, 4096)]
+    
+    iters = 1 if LITE_MODE else (100 if QUICK_MODE else 1000)
+    warmup = 1 if LITE_MODE else 10
         
-    for B, N in configs:
-        if QUICK_MODE and B > 500: continue
-        
-        name = f"RMSNorm ({B}x{N})"
-        print(f"  Running {name}...")
-        
-        iters = 1 if LITE_MODE else (100 if QUICK_MODE else 1000)
-        warmup = 1 if LITE_MODE else 10
-        
-        x = torch.randn(B, N, device=device, dtype=torch.float32, requires_grad=True)
-        dy = torch.randn(B, N, device=device, dtype=torch.float32)
-        
-        model_metal = MetalRMSNorm(N).to(device)
-        model_torch = torch.nn.RMSNorm(N).to(device)
-        
-        # Function to time Metal
-        def run_metal():
-            y = model_metal(x)
-            y.backward(dy, retain_graph=True)
-            if device == 'mps': torch.mps.synchronize()
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for B, N in configs:
+            if QUICK_MODE and B > 500: continue
             
-        # Function to time Torch
-        def run_torch():
-            y = model_torch(x)
-            y.backward(dy, retain_graph=True)
-            if device == 'mps': torch.mps.synchronize()
+            name = f"RMSNorm ({B}x{N}) {dtype_name}"
+            print(f"  Running {name}...")
             
-        # Warmup
-        for _ in range(warmup):
-            run_metal()
-            run_torch()
+            x = torch.randn(B, N, device=device, dtype=dtype, requires_grad=True)
+            dy = torch.randn(B, N, device=device, dtype=dtype)
             
-        # Benchmark Metal
-        start = time.time()
-        for _ in range(iters):
-            run_metal()
-        metal_time = (time.time() - start) / iters * 1000 # ms
-        
-        # Benchmark Torch
-        start = time.time()
-        for _ in range(iters):
-            run_torch()
-        torch_time = (time.time() - start) / iters * 1000 # ms
-        
-        ratio = metal_time / torch_time
-        status = color_ratio(ratio)
-        
-        results.append([
-            f"{B}x{N}", "Fwd+Bwd",
-            format_time(metal_time), format_time(torch_time),
-            f"{ratio:.2f}x", status
-        ])
-        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+            model_metal = MetalRMSNorm(N).to(device).to(dtype)
+            model_torch = torch.nn.RMSNorm(N).to(device).to(dtype)
+            
+            # Function to time Metal
+            def run_metal():
+                y = model_metal(x)
+                y.backward(dy, retain_graph=True)
+                if device == 'mps': torch.mps.synchronize()
+                
+            # Function to time Torch
+            def run_torch():
+                y = model_torch(x)
+                y.backward(dy, retain_graph=True)
+                if device == 'mps': torch.mps.synchronize()
+                
+            # Warmup
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark Metal
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000 # ms
+            
+            # Benchmark Torch
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000 # ms
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                f"{B}x{N}", f"Fwd+Bwd {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
         
     return results
 
@@ -950,60 +1220,61 @@ def benchmark_adamw():
     if LITE_MODE:
         configs = [(1024*1024, "1M Params")]
     
-    for N, label in configs:
-        if QUICK_MODE and N > 5*1024*1024: continue
-        
-        name = f"AdamW ({label})"
-        print(f"  Running {name}...")
-        
-        iters = 1 if LITE_MODE else (50 if QUICK_MODE else 100)
-        warmup = 1 if LITE_MODE else 5
-        
-        p = torch.randn(N, device=device)
-        g = torch.randn(N, device=device)
-        
-        p_metal = p.clone()
-        p_metal.grad = g.clone()
-        opt_metal = MetalAdamW([p_metal], lr=1e-3)
-        
-        p_torch = p.clone()
-        p_torch.grad = g.clone()
-        opt_torch = torch.optim.AdamW([p_torch], lr=1e-3)
-        
-        def run_metal():
-            opt_metal.step()
-            if device == 'mps': torch.mps.synchronize()
+    iters = 1 if LITE_MODE else (50 if QUICK_MODE else 100)
+    warmup = 1 if LITE_MODE else 5
+    
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for N, label in configs:
+            if QUICK_MODE and N > 5*1024*1024: continue
             
-        def run_torch():
-            opt_torch.step()
-            if device == 'mps': torch.mps.synchronize()
+            name = f"AdamW ({label}) {dtype_name}"
+            print(f"  Running {name}...")
             
-        # Warmup
-        for _ in range(warmup):
-            run_metal()
-            run_torch()
+            p = torch.randn(N, device=device, dtype=dtype)
+            g = torch.randn(N, device=device, dtype=dtype)
             
-        # Benchmark Metal
-        start = time.time()
-        for _ in range(iters):
-            run_metal()
-        metal_time = (time.time() - start) / iters * 1000
-        
-        # Benchmark Torch
-        start = time.time()
-        for _ in range(iters):
-            run_torch()
-        torch_time = (time.time() - start) / iters * 1000
-        
-        ratio = metal_time / torch_time
-        status = color_ratio(ratio)
-        
-        results.append([
-            label, f"N={N}",
-            format_time(metal_time), format_time(torch_time),
-            f"{ratio:.2f}x", status
-        ])
-        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+            p_metal = p.clone()
+            p_metal.grad = g.clone()
+            opt_metal = MetalAdamW([p_metal], lr=1e-3)
+            
+            p_torch = p.clone()
+            p_torch.grad = g.clone()
+            opt_torch = torch.optim.AdamW([p_torch], lr=1e-3)
+            
+            def run_metal():
+                opt_metal.step()
+                if device == 'mps': torch.mps.synchronize()
+                
+            def run_torch():
+                opt_torch.step()
+                if device == 'mps': torch.mps.synchronize()
+                
+            # Warmup
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark Metal
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            # Benchmark Torch
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                label, f"N={N} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
         
     return results
 
@@ -1031,84 +1302,85 @@ def benchmark_activations():
     iters = 1 if LITE_MODE else (50 if QUICK_MODE else 100)
     warmup = 1 if LITE_MODE else 5
     
-    for shape, label in configs:
-        if QUICK_MODE and shape[0] > 2048: continue
-        
-        x = torch.randn(*shape, device=device, dtype=torch.float32)
-        
-        # GELU benchmark
-        name = f"GELU {label}"
-        print(f"  Running {name}...")
-        
-        def run_metal_gelu():
-            y = metal_gelu(x)
-            if device == 'mps': torch.mps.synchronize()
-            return y
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for shape, label in configs:
+            if QUICK_MODE and shape[0] > 2048: continue
             
-        def run_torch_gelu():
-            y = F.gelu(x, approximate='tanh')
-            if device == 'mps': torch.mps.synchronize()
-            return y
+            x = torch.randn(*shape, device=device, dtype=dtype)
         
-        for _ in range(warmup):
-            run_metal_gelu()
-            run_torch_gelu()
-        
-        start = time.time()
-        for _ in range(iters):
-            run_metal_gelu()
-        metal_time = (time.time() - start) / iters * 1000
-        
-        start = time.time()
-        for _ in range(iters):
-            run_torch_gelu()
-        torch_time = (time.time() - start) / iters * 1000
-        
-        ratio = metal_time / torch_time
-        status = color_ratio(ratio)
-        results.append([
-            f"GELU {label}", f"{shape[0]}x{shape[1]}",
-            format_time(metal_time), format_time(torch_time),
-            f"{ratio:.2f}x", status
-        ])
-        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
-        
-        # SiLU benchmark
-        name = f"SiLU {label}"
-        print(f"  Running {name}...")
-        
-        def run_metal_silu():
-            y = metal_silu(x)
-            if device == 'mps': torch.mps.synchronize()
-            return y
+            # GELU benchmark
+            name = f"GELU {label} {dtype_name}"
+            print(f"  Running {name}...")
             
-        def run_torch_silu():
-            y = F.silu(x)
-            if device == 'mps': torch.mps.synchronize()
-            return y
-        
-        for _ in range(warmup):
-            run_metal_silu()
-            run_torch_silu()
-        
-        start = time.time()
-        for _ in range(iters):
-            run_metal_silu()
-        metal_time = (time.time() - start) / iters * 1000
-        
-        start = time.time()
-        for _ in range(iters):
-            run_torch_silu()
-        torch_time = (time.time() - start) / iters * 1000
-        
-        ratio = metal_time / torch_time
-        status = color_ratio(ratio)
-        results.append([
-            f"SiLU {label}", f"{shape[0]}x{shape[1]}",
-            format_time(metal_time), format_time(torch_time),
-            f"{ratio:.2f}x", status
-        ])
-        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+            def run_metal_gelu():
+                y = metal_gelu(x)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            def run_torch_gelu():
+                y = F.gelu(x, approximate='tanh')
+                if device == 'mps': torch.mps.synchronize()
+                return y
+            
+            for _ in range(warmup):
+                run_metal_gelu()
+                run_torch_gelu()
+            
+            start = time.time()
+            for _ in range(iters):
+                run_metal_gelu()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            start = time.time()
+            for _ in range(iters):
+                run_torch_gelu()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            results.append([
+                f"GELU {label}", f"{shape[0]}x{shape[1]} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+            
+            # SiLU benchmark
+            name = f"SiLU {label} {dtype_name}"
+            print(f"  Running {name}...")
+            
+            def run_metal_silu():
+                y = metal_silu(x)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            def run_torch_silu():
+                y = F.silu(x)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+            
+            for _ in range(warmup):
+                run_metal_silu()
+                run_torch_silu()
+            
+            start = time.time()
+            for _ in range(iters):
+                run_metal_silu()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            start = time.time()
+            for _ in range(iters):
+                run_torch_silu()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            results.append([
+                f"SiLU {label}", f"{shape[0]}x{shape[1]} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
         
     return results
 
@@ -1136,99 +1408,100 @@ def benchmark_sdpa():
     iters = 1 if LITE_MODE else (20 if QUICK_MODE else 50)
     warmup = 1 if LITE_MODE else 3
     
-    for shape, label in configs:
-        B, H, N, D = shape
-        if QUICK_MODE and N > 256: continue
-        
-        Q = torch.randn(B, H, N, D, device=device, dtype=torch.float32)
-        K = torch.randn(B, H, N, D, device=device, dtype=torch.float32)
-        V = torch.randn(B, H, N, D, device=device, dtype=torch.float32)
-        
-        # Non-causal SDPA
-        name = f"SDPA {label}"
-        print(f"  Running {name}...")
-        
-        def run_metal_sdpa():
-            y = metal_scaled_dot_product_attention(Q, K, V, is_causal=False)
-            if device == 'mps': torch.mps.synchronize()
-            return y
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for shape, label in configs:
+            B, H, N, D = shape
+            if QUICK_MODE and N > 256: continue
             
-        def run_torch_sdpa():
-            y = F.scaled_dot_product_attention(Q, K, V, is_causal=False)
-            if device == 'mps': torch.mps.synchronize()
-            return y
-        
-        for _ in range(warmup):
-            run_metal_sdpa()
-            run_torch_sdpa()
-        
-        start = time.time()
-        for _ in range(iters):
-            run_metal_sdpa()
-        metal_time = (time.time() - start) / iters * 1000
-        
-        start = time.time()
-        for _ in range(iters):
-            run_torch_sdpa()
-        torch_time = (time.time() - start) / iters * 1000
-        
-        ratio = metal_time / torch_time
-        status = color_ratio(ratio)
-        
-        # Accuracy check
-        O_metal = run_metal_sdpa()
-        O_torch = run_torch_sdpa()
-        max_err = (O_metal - O_torch).abs().max().item()
-        
-        results.append([
-            label, f"B={B}, H={H}, N={N}, D={D}",
-            format_time(metal_time), format_time(torch_time),
-            f"{ratio:.2f}x", status, format_accuracy(max_err)
-        ])
-        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
-        
-        # Causal SDPA
-        name = f"SDPA Causal {label}"
-        print(f"  Running {name}...")
-        
-        def run_metal_sdpa_causal():
-            y = metal_scaled_dot_product_attention(Q, K, V, is_causal=True)
-            if device == 'mps': torch.mps.synchronize()
-            return y
+            Q = torch.randn(B, H, N, D, device=device, dtype=dtype)
+            K = torch.randn(B, H, N, D, device=device, dtype=dtype)
+            V = torch.randn(B, H, N, D, device=device, dtype=dtype)
             
-        def run_torch_sdpa_causal():
-            y = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
-            if device == 'mps': torch.mps.synchronize()
-            return y
-        
-        for _ in range(warmup):
-            run_metal_sdpa_causal()
-            run_torch_sdpa_causal()
-        
-        start = time.time()
-        for _ in range(iters):
-            run_metal_sdpa_causal()
-        metal_time = (time.time() - start) / iters * 1000
-        
-        start = time.time()
-        for _ in range(iters):
-            run_torch_sdpa_causal()
-        torch_time = (time.time() - start) / iters * 1000
-        
-        ratio = metal_time / torch_time
-        status = color_ratio(ratio)
-        
-        # Accuracy check
-        O_metal = run_metal_sdpa_causal()
-        O_torch = run_torch_sdpa_causal()
-        max_err = (O_metal - O_torch).abs().max().item()
-        
-        results.append([
-            f"{label} (causal)", f"B={B}, H={H}, N={N}, D={D}",
-            format_time(metal_time), format_time(torch_time),
-            f"{ratio:.2f}x", status, format_accuracy(max_err)
-        ])
-        print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+            # Non-causal SDPA
+            name = f"SDPA {label} {dtype_name}"
+            print(f"  Running {name}...")
+            
+            def run_metal_sdpa():
+                y = metal_scaled_dot_product_attention(Q, K, V, is_causal=False)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            def run_torch_sdpa():
+                y = F.scaled_dot_product_attention(Q, K, V, is_causal=False)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+            
+            for _ in range(warmup):
+                run_metal_sdpa()
+                run_torch_sdpa()
+            
+            start = time.time()
+            for _ in range(iters):
+                run_metal_sdpa()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            start = time.time()
+            for _ in range(iters):
+                run_torch_sdpa()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            # Accuracy check
+            O_metal = run_metal_sdpa()
+            O_torch = run_torch_sdpa()
+            max_err = (O_metal.float() - O_torch.float()).abs().max().item()
+            
+            results.append([
+                label, f"B={B}, H={H}, N={N}, D={D} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status, format_accuracy(max_err)
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+            
+            # Causal SDPA
+            name = f"SDPA Causal {label} {dtype_name}"
+            print(f"  Running {name}...")
+            
+            def run_metal_sdpa_causal():
+                y = metal_scaled_dot_product_attention(Q, K, V, is_causal=True)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            def run_torch_sdpa_causal():
+                y = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+            
+            for _ in range(warmup):
+                run_metal_sdpa_causal()
+                run_torch_sdpa_causal()
+            
+            start = time.time()
+            for _ in range(iters):
+                run_metal_sdpa_causal()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            start = time.time()
+            for _ in range(iters):
+                run_torch_sdpa_causal()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            # Accuracy check
+            O_metal = run_metal_sdpa_causal()
+            O_torch = run_torch_sdpa_causal()
+            max_err = (O_metal.float() - O_torch.float()).abs().max().item()
+            
+            results.append([
+                f"{label} (causal)", f"B={B}, H={H}, N={N}, D={D} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status, format_accuracy(max_err)
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
         
     return results
 
@@ -1584,8 +1857,71 @@ def main():
     # Write results (skip in lite mode)
     if not LITE_MODE:
         output_path = Path(__file__).parent / "benchmarks.md"
-        with open(output_path, 'w') as f:
-            f.write(results.to_markdown())
+        
+        # Track which benchmark sections were actually run
+        ran_benchmarks = set()
+        if RUN_SVD and svd_results:
+            ran_benchmarks.add("SVD (metalcore) ⭐ GPU WINS")
+            ran_benchmarks.add("SVD (metalsvd)")
+        if RUN_QR and qr_single_results:
+            ran_benchmarks.add("QR Single Matrix (metalcore)")
+        if RUN_QR and qr_batched_results:
+            ran_benchmarks.add("QR Batched (metalcore) ⭐ GPU WINS")
+        if RUN_CHOLESKY and cholesky_results:
+            ran_benchmarks.add("Cholesky (metalcore) ⭐ GPU WINS")
+        if RUN_SOLVE and solve_results:
+            ran_benchmarks.add("Linear Solve (metalcore)")
+        if RUN_EIGH and eigh_results:
+            ran_benchmarks.add("Eigendecomposition (metaleig)")
+        if RUN_RMSNORM and rmsnorm_results:
+            ran_benchmarks.add("RMSNorm (metalcore) ⭐ GPU WINS")
+        if RUN_ADAMW and adamw_results:
+            ran_benchmarks.add("AdamW (metalcore) ⭐ GPU WINS")
+        if RUN_ACTIVATIONS and activations_results:
+            ran_benchmarks.add("Activations (metalcore)")
+        if RUN_SDPA and sdpa_results:
+            ran_benchmarks.add("SDPA (metalcore)")
+        if RUN_PIPELINE and pipeline_results:
+            ran_benchmarks.add("Pipeline Operations ⭐ GPU WINS (No Transfer)")
+        if RUN_MODELS and model_results:
+            for model_name in model_results.keys():
+                ran_benchmarks.add(f"LLM: {model_name}")
+        
+        # If running all benchmarks, just overwrite the file
+        if RUN_ALL:
+            with open(output_path, 'w') as f:
+                f.write(results.to_markdown())
+            print(f"\nFull benchmark run - overwrote {output_path}")
+        else:
+            # Partial run - merge with existing file
+            existing_sections = parse_existing_benchmarks(output_path)
+            merged = merge_benchmark_sections(results, existing_sections, ran_benchmarks)
+            
+            # Build the merged markdown file
+            lines = [
+                "# Metalops Benchmark Results",
+                "",
+                f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
+                "",
+                "**Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | ⚪ Close | 🟠 CPU wins | 🔴 CPU wins big (>3x)",
+                "",
+            ]
+            
+            # Add sections in canonical order
+            for section_title in SECTION_ORDER:
+                if section_title in merged:
+                    lines.append(merged[section_title])
+            
+            # Add any sections not in canonical order (shouldn't happen, but just in case)
+            for section_title in merged:
+                if section_title not in SECTION_ORDER:
+                    lines.append(merged[section_title])
+            
+            with open(output_path, 'w') as f:
+                f.write('\n'.join(lines))
+            
+            print(f"\nPartial benchmark run - merged {len(ran_benchmarks)} section(s) into {output_path}")
+            print(f"  Updated: {', '.join(sorted(ran_benchmarks))}")
         
         # Save to JSONL history (structured data for comparisons)
         history_data = {

@@ -28,6 +28,7 @@ from .rmsnorm import RMSNormFunction, MetalRMSNorm
 from .optim import MetalAdamW
 from .activations import metal_gelu, metal_silu, MetalGELU, MetalSiLU
 from .sdpa import metal_scaled_dot_product_attention
+from .comfy_patch import patch_comfy, unpatch_comfy, is_patched
 
 # High-impact ops (direct backend exports)
 try:
@@ -83,7 +84,7 @@ def is_metal_sdpa_enabled():
     """Check if Metal SDPA is currently enabled."""
     return _sdpa_enabled
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 __all__ = [
     "trsm",
     "trsm_batched", 
@@ -112,4 +113,8 @@ __all__ = [
     "enable_metal_sdpa",
     "disable_metal_sdpa",
     "is_metal_sdpa_enabled",
+    # ComfyUI patches
+    "patch_comfy",
+    "unpatch_comfy",
+    "is_patched",
 ]

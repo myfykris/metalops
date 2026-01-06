@@ -10,6 +10,10 @@
 - **Missing SIMD for BFloat16**: `simd_shuffle_down` not defined. Cast to `ushort`, shuffle, cast back.
 - **Function Dependencies**: Helpers used in macros must be defined before the macro.
 
+## Linear Algebra Precision
+- **fp16/bf16 NaN Issues**: LU factorization (used in `solve`) produces NaNs with half-precision. Always promote to fp32 for computation, convert back after.
+- **Pattern**: `bool need_conversion = (dtype == kHalf || dtype == kBFloat16); A_in = need_conversion ? A.to(kFloat) : A; ... return need_conversion ? result.to(input_dtype) : result;`
+
 ## Common Pitfalls
 - **Stale Encoder**: Allocate tensors BEFORE `stream->commandEncoder()`. PyTorch ops invalidate encoders.
 - **Encoder Conflicts**: Call `stream->synchronize(SyncType::COMMIT)` before creating encoder in backward pass.

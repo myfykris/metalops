@@ -17,6 +17,7 @@ packages/metalcore/
     ├── svd.py           # SVD with De Rijk optimization
     ├── qr.py            # QR decomposition
     ├── cholesky.py      # Cholesky factorization
+    ├── solve.py         # Linear solve (LU-based, fp16/bf16 supported)
     ├── rmsnorm.py       # MetalRMSNorm module
     ├── optim.py         # MetalAdamW optimizer
     ├── activations.py   # metal_gelu, metal_silu

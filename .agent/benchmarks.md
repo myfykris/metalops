@@ -8,7 +8,7 @@ python benchmark.py --activations    # GELU + SiLU
 python benchmark.py --sdpa           # Scaled Dot Product Attention
 ```
 
-## Training Ops (v0.1.5)
+## Training Ops (v0.1.6)
 
 | Operation | Size | Metal vs Torch | Status |
 |-----------|------|----------------|--------|
