@@ -1,7 +1,7 @@
 # Metalcore - Consolidated Metal Ops for PyTorch
 
 ## Current Status
-metalcore v0.1.7 consolidates all Metal-accelerated operations:
+metalcore v0.1.8 consolidates all Metal-accelerated operations:
 - **LA Ops**: SVD, Eigh, QR, Cholesky, Solve, TRSM
 - **Training Ops**: RMSNorm, AdamW, GELU, SiLU, SDPA
 
