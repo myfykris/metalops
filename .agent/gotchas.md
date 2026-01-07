@@ -1,5 +1,14 @@
 # Metal & PyTorch MPS Gotchas
 
+## CRITICAL: Before Doing ANYTHING
+**ALWAYS check for existing scripts first!** Before building wheels, running tests, or any repetitive task:
+```bash
+ls *.sh && cat .agent/workflows/*.md
+```
+Key scripts in this repo:
+- `build_all_wheels.sh` - Build and patch wheels for all Python versions
+- `/release` workflow - Full release process including PyPI
+
 ## PyTorch MPS Backend
 - **QR Fallback**: `torch.linalg.qr` falls back to CPU on MPS. Use `metalcore.qr()` for GPU.
 - **BFloat16**: Requires Metal 3.1+ (macOS 14+). Check with `__METAL_VERSION__ >= 310`.
