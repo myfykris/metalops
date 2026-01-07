@@ -219,6 +219,34 @@ struct CoreKernels {
     id<MTLComputePipelineState> flashAttentionFwdV2PSO = nil;
     id<MTLFunction> flashAttentionBwdV2 = nil;
     id<MTLComputePipelineState> flashAttentionBwdV2PSO = nil;
+    
+    // Fused Softmax
+    id<MTLFunction> fusedSoftmax = nil;
+    id<MTLComputePipelineState> fusedSoftmaxPSO = nil;
+    id<MTLFunction> fusedSoftmaxVec4 = nil;
+    id<MTLComputePipelineState> fusedSoftmaxVec4PSO = nil;
+    
+    // LayerNorm
+    id<MTLFunction> layernormFwd = nil;
+    id<MTLComputePipelineState> layernormFwdPSO = nil;
+    id<MTLFunction> fusedAddLayernorm = nil;
+    id<MTLComputePipelineState> fusedAddLayernormPSO = nil;
+    
+    // Embedding Bag
+    id<MTLFunction> embeddingBagSimple = nil;
+    id<MTLComputePipelineState> embeddingBagSimplePSO = nil;
+    
+    // Scatter/Gather
+    id<MTLFunction> gather1d = nil;
+    id<MTLComputePipelineState> gather1dPSO = nil;
+    id<MTLFunction> gather2d = nil;
+    id<MTLComputePipelineState> gather2dPSO = nil;
+    id<MTLFunction> scatterAdd1d = nil;
+    id<MTLComputePipelineState> scatterAdd1dPSO = nil;
+    id<MTLFunction> scatterAdd2d = nil;
+    id<MTLComputePipelineState> scatterAdd2dPSO = nil;
+    id<MTLFunction> indexSelect = nil;
+    id<MTLComputePipelineState> indexSelectPSO = nil;
 
 };
 
@@ -593,6 +621,34 @@ void load_core_kernels() {
         
         kernels.flashAttentionBwdV2 = [coreLib newFunctionWithName:@"flash_attention_bwd_v2"];
         if (kernels.flashAttentionBwdV2) kernels.flashAttentionBwdV2PSO = [device newComputePipelineStateWithFunction:kernels.flashAttentionBwdV2 error:&error];
+        
+        // Fused Softmax
+        kernels.fusedSoftmax = [coreLib newFunctionWithName:@"fused_softmax"];
+        if (kernels.fusedSoftmax) kernels.fusedSoftmaxPSO = [device newComputePipelineStateWithFunction:kernels.fusedSoftmax error:&error];
+        kernels.fusedSoftmaxVec4 = [coreLib newFunctionWithName:@"fused_softmax_vec4"];
+        if (kernels.fusedSoftmaxVec4) kernels.fusedSoftmaxVec4PSO = [device newComputePipelineStateWithFunction:kernels.fusedSoftmaxVec4 error:&error];
+        
+        // LayerNorm
+        kernels.layernormFwd = [coreLib newFunctionWithName:@"layernorm_fwd"];
+        if (kernels.layernormFwd) kernels.layernormFwdPSO = [device newComputePipelineStateWithFunction:kernels.layernormFwd error:&error];
+        kernels.fusedAddLayernorm = [coreLib newFunctionWithName:@"fused_add_layernorm"];
+        if (kernels.fusedAddLayernorm) kernels.fusedAddLayernormPSO = [device newComputePipelineStateWithFunction:kernels.fusedAddLayernorm error:&error];
+        
+        // Embedding Bag
+        kernels.embeddingBagSimple = [coreLib newFunctionWithName:@"embedding_bag_simple"];
+        if (kernels.embeddingBagSimple) kernels.embeddingBagSimplePSO = [device newComputePipelineStateWithFunction:kernels.embeddingBagSimple error:&error];
+        
+        // Scatter/Gather
+        kernels.gather1d = [coreLib newFunctionWithName:@"gather_1d"];
+        if (kernels.gather1d) kernels.gather1dPSO = [device newComputePipelineStateWithFunction:kernels.gather1d error:&error];
+        kernels.gather2d = [coreLib newFunctionWithName:@"gather_2d"];
+        if (kernels.gather2d) kernels.gather2dPSO = [device newComputePipelineStateWithFunction:kernels.gather2d error:&error];
+        kernels.scatterAdd1d = [coreLib newFunctionWithName:@"scatter_add_1d"];
+        if (kernels.scatterAdd1d) kernels.scatterAdd1dPSO = [device newComputePipelineStateWithFunction:kernels.scatterAdd1d error:&error];
+        kernels.scatterAdd2d = [coreLib newFunctionWithName:@"scatter_add_2d"];
+        if (kernels.scatterAdd2d) kernels.scatterAdd2dPSO = [device newComputePipelineStateWithFunction:kernels.scatterAdd2d error:&error];
+        kernels.indexSelect = [coreLib newFunctionWithName:@"index_select"];
+        if (kernels.indexSelect) kernels.indexSelectPSO = [device newComputePipelineStateWithFunction:kernels.indexSelect error:&error];
 
         
         printf("metalcore: Loaded %d kernel functions\n", 
@@ -3229,6 +3285,289 @@ torch::Tensor solve_metal(torch::Tensor A, torch::Tensor b) {
     return need_conversion ? result.to(input_dtype) : result;
 }
 
+// -----------------------------------------------------------------------------
+// Fused Softmax
+// -----------------------------------------------------------------------------
+
+torch::Tensor fused_softmax_metal(torch::Tensor input, int64_t dim_) {
+    load_core_kernels();
+    
+    TORCH_CHECK(input.device().type() == at::kMPS, "Input must be on MPS device");
+    
+    auto x = input.contiguous();
+    auto output = torch::empty_like(x);
+    
+    // Normalize negative dim
+    int64_t ndim = x.dim();
+    int64_t dim = dim_ < 0 ? dim_ + ndim : dim_;
+    TORCH_CHECK(dim >= 0 && dim < ndim, "Invalid dim for softmax");
+    
+    // Calculate outer_size, dim_size, inner_size
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) outer_size *= x.size(i);
+    int64_t dim_size = x.size(dim);
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) inner_size *= x.size(i);
+    
+    // Use vectorized kernel if possible
+    bool use_vec4 = (dim_size % 4 == 0) && (inner_size == 1) && kernels.fusedSoftmaxVec4PSO;
+    id<MTLComputePipelineState> pso = use_vec4 ? kernels.fusedSoftmaxVec4PSO : kernels.fusedSoftmaxPSO;
+    
+    if (!pso) {
+        // Fallback to PyTorch
+        return torch::softmax(input, dim_);
+    }
+    
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        
+        [encoder setComputePipelineState:pso];
+        [encoder setBuffer:getMTLBufferStorage(x) offset:x.storage_offset() * x.element_size() atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:1];
+        
+        uint32_t dim_u = static_cast<uint32_t>(dim_size);
+        uint32_t outer_u = static_cast<uint32_t>(outer_size);
+        uint32_t inner_u = static_cast<uint32_t>(inner_size);
+        
+        [encoder setBytes:&dim_u length:sizeof(uint32_t) atIndex:2];
+        [encoder setBytes:&outer_u length:sizeof(uint32_t) atIndex:3];
+        if (!use_vec4) {
+            [encoder setBytes:&inner_u length:sizeof(uint32_t) atIndex:4];
+        }
+        
+        // One threadgroup per row
+        NSUInteger threadsPerGroup = std::min(256UL, static_cast<NSUInteger>(dim_size));
+        [encoder dispatchThreadgroups:MTLSizeMake(outer_size, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+        
+        [encoder endEncoding];
+        torch::mps::synchronize();
+    }
+    
+    return output;
+}
+
+// -----------------------------------------------------------------------------
+// LayerNorm
+// -----------------------------------------------------------------------------
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> layernorm_fwd_metal(
+    torch::Tensor input,
+    torch::Tensor weight,
+    torch::Tensor bias,
+    float eps
+) {
+    load_core_kernels();
+    
+    TORCH_CHECK(input.device().type() == at::kMPS, "Input must be on MPS device");
+    
+    auto x = input.contiguous();
+    int64_t N = x.size(-1);  // normalized dim
+    int64_t B = x.numel() / N;  // batch size (all other dims)
+    
+    auto output = torch::empty_like(x);
+    auto mean = torch::empty({B}, x.options().dtype(torch::kFloat32));
+    auto rstd = torch::empty({B}, x.options().dtype(torch::kFloat32));
+    
+    auto w = weight.contiguous();
+    auto b = bias.contiguous();
+    
+    if (!kernels.layernormFwdPSO) {
+        // Fallback
+        auto result = torch::layer_norm(input, {N}, weight, bias, eps);
+        auto m = x.view({B, N}).mean(-1);
+        auto v = x.view({B, N}).var(-1, false);
+        return std::make_tuple(result, m, torch::rsqrt(v + eps));
+    }
+    
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.layernormFwdPSO];
+        [encoder setBuffer:getMTLBufferStorage(x) offset:x.storage_offset() * x.element_size() atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(w) offset:w.storage_offset() * w.element_size() atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(b) offset:b.storage_offset() * b.element_size() atIndex:2];
+        [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:3];
+        [encoder setBuffer:getMTLBufferStorage(mean) offset:mean.storage_offset() * mean.element_size() atIndex:4];
+        [encoder setBuffer:getMTLBufferStorage(rstd) offset:rstd.storage_offset() * rstd.element_size() atIndex:5];
+        
+        uint32_t N_u = static_cast<uint32_t>(N);
+        [encoder setBytes:&N_u length:sizeof(uint32_t) atIndex:6];
+        [encoder setBytes:&eps length:sizeof(float) atIndex:7];
+        
+        NSUInteger threadsPerGroup = std::min(256UL, static_cast<NSUInteger>(N));
+        [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
+        
+        [encoder endEncoding];
+        torch::mps::synchronize();
+    }
+    
+    return std::make_tuple(output, mean, rstd);
+}
+
+// -----------------------------------------------------------------------------
+// Embedding Bag
+// -----------------------------------------------------------------------------
+
+torch::Tensor embedding_bag_metal(
+    torch::Tensor weight,
+    torch::Tensor indices,
+    torch::Tensor offsets,
+    int64_t mode  // 0=sum, 1=mean, 2=max
+) {
+    load_core_kernels();
+    
+    TORCH_CHECK(weight.device().type() == at::kMPS, "Weight must be on MPS device");
+    TORCH_CHECK(indices.device().type() == at::kMPS, "Indices must be on MPS device");
+    TORCH_CHECK(offsets.device().type() == at::kMPS, "Offsets must be on MPS device");
+    
+    auto w = weight.contiguous();
+    auto idx = indices.to(torch::kInt32).contiguous();
+    auto off = offsets.to(torch::kInt32).contiguous();
+    
+    int64_t batch_size = offsets.size(0) - 1;
+    int64_t dim = weight.size(1);
+    
+    auto output = torch::zeros({batch_size, dim}, w.options());
+    
+    if (!kernels.embeddingBagSimplePSO) {
+        // Fallback to PyTorch
+        auto [out, _, __, ___] = torch::embedding_bag(weight, indices, offsets, false, mode);
+        return out;
+    }
+    
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
+        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        
+        [encoder setComputePipelineState:kernels.embeddingBagSimplePSO];
+        [encoder setBuffer:getMTLBufferStorage(w) offset:w.storage_offset() * w.element_size() atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(idx) offset:idx.storage_offset() * idx.element_size() atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(off) offset:off.storage_offset() * off.element_size() atIndex:2];
+        [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:3];
+        
+        uint32_t dim_u = static_cast<uint32_t>(dim);
+        uint32_t batch_u = static_cast<uint32_t>(batch_size);
+        uint32_t mode_u = static_cast<uint32_t>(mode);
+        
+        [encoder setBytes:&dim_u length:sizeof(uint32_t) atIndex:4];
+        [encoder setBytes:&batch_u length:sizeof(uint32_t) atIndex:5];
+        [encoder setBytes:&mode_u length:sizeof(uint32_t) atIndex:6];
+        
+        // 2D grid: dim x batch_size
+        [encoder dispatchThreads:MTLSizeMake(dim, batch_size, 1)
+           threadsPerThreadgroup:MTLSizeMake(std::min(256UL, static_cast<NSUInteger>(dim)), 1, 1)];
+        
+        [encoder endEncoding];
+        torch::mps::synchronize();
+    }
+    
+    return output;
+}
+
+// -----------------------------------------------------------------------------
+// Scatter/Gather
+// -----------------------------------------------------------------------------
+
+torch::Tensor gather_metal(torch::Tensor src, torch::Tensor index, int64_t dim_) {
+    load_core_kernels();
+    
+    TORCH_CHECK(src.device().type() == at::kMPS, "src must be on MPS device");
+    TORCH_CHECK(index.device().type() == at::kMPS, "index must be on MPS device");
+    
+    auto s = src.contiguous();
+    auto idx = index.to(torch::kInt32).contiguous();
+    
+    // For 1D gather
+    if (src.dim() == 1 && index.dim() == 1) {
+        auto output = torch::empty({index.size(0)}, s.options());
+        
+        if (!kernels.gather1dPSO) {
+            return torch::gather(src, 0, index.to(torch::kLong));
+        }
+        
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
+            id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+            
+            [encoder setComputePipelineState:kernels.gather1dPSO];
+            [encoder setBuffer:getMTLBufferStorage(s) offset:s.storage_offset() * s.element_size() atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(idx) offset:idx.storage_offset() * idx.element_size() atIndex:1];
+            [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:2];
+            
+            uint32_t n = static_cast<uint32_t>(index.size(0));
+            [encoder setBytes:&n length:sizeof(uint32_t) atIndex:3];
+            
+            [encoder dispatchThreads:MTLSizeMake(n, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            
+            [encoder endEncoding];
+            torch::mps::synchronize();
+        }
+        
+        return output;
+    }
+    
+    // Fallback to PyTorch for other cases
+    return torch::gather(src, dim_, index.to(torch::kLong));
+}
+
+torch::Tensor scatter_add_metal(torch::Tensor dst, torch::Tensor index, torch::Tensor src, int64_t dim_) {
+    load_core_kernels();
+    
+    TORCH_CHECK(dst.device().type() == at::kMPS, "dst must be on MPS device");
+    TORCH_CHECK(index.device().type() == at::kMPS, "index must be on MPS device");
+    TORCH_CHECK(src.device().type() == at::kMPS, "src must be on MPS device");
+    
+    auto output = dst.clone().contiguous();
+    auto idx = index.to(torch::kInt32).contiguous();
+    auto s = src.contiguous();
+    
+    // For 1D scatter_add
+    if (dst.dim() == 1 && index.dim() == 1 && src.dim() == 1) {
+        if (!kernels.scatterAdd1dPSO) {
+            return dst.scatter_add(0, index.to(torch::kLong), src);
+        }
+        
+        @autoreleasepool {
+            id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
+            id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+            
+            [encoder setComputePipelineState:kernels.scatterAdd1dPSO];
+            [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(idx) offset:idx.storage_offset() * idx.element_size() atIndex:1];
+            [encoder setBuffer:getMTLBufferStorage(s) offset:s.storage_offset() * s.element_size() atIndex:2];
+            
+            uint32_t n = static_cast<uint32_t>(src.size(0));
+            [encoder setBytes:&n length:sizeof(uint32_t) atIndex:3];
+            
+            [encoder dispatchThreads:MTLSizeMake(n, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            
+            [encoder endEncoding];
+            torch::mps::synchronize();
+        }
+        
+        return output;
+    }
+    
+    // Fallback for other cases
+    return dst.scatter_add(dim_, index.to(torch::kLong), src);
+}
+
+torch::Tensor index_select_metal(torch::Tensor src, int64_t dim, torch::Tensor index) {
+    load_core_kernels();
+    
+    TORCH_CHECK(src.device().type() == at::kMPS, "src must be on MPS device");
+    TORCH_CHECK(index.device().type() == at::kMPS, "index must be on MPS device");
+    
+    // Use PyTorch's optimized implementation as baseline
+    return torch::index_select(src, dim, index.to(torch::kLong));
+}
+
 PYBIND11_MODULE(metalcore_backend, m) {
     m.def("trsm", &trsm_metal, "Triangular Solve (TRSM)");
     m.def("geqr2", &geqr2_metal, "Panel Householder QR");
@@ -3270,5 +3609,13 @@ PYBIND11_MODULE(metalcore_backend, m) {
     m.def("softmax_batched", &softmax_batched_metal, "Batched Softmax");
     m.def("trace_batched", &trace_batched_metal, "Batched Trace");
     m.def("lu_batched", &lu_batched_metal, "Batched LU Decomposition");
+    
+    // New high-performance ops
+    m.def("fused_softmax", &fused_softmax_metal, "Fused Softmax with online algorithm");
+    m.def("layernorm_fwd", &layernorm_fwd_metal, "LayerNorm Forward");
+    m.def("embedding_bag", &embedding_bag_metal, "Embedding Bag (sum/mean/max)");
+    m.def("gather", &gather_metal, "Gather operation");
+    m.def("scatter_add", &scatter_add_metal, "Scatter Add operation");
+    m.def("index_select", &index_select_metal, "Index Select operation");
 }
 

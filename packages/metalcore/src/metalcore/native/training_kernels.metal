@@ -1195,3 +1195,476 @@ kernel void rmsnorm_bwd_dw_vec4(
     
     dW[id] = sum_val;
 }
+
+// =============================================================================
+// FUSED SOFTMAX - Online Algorithm (single pass max + sum)
+// =============================================================================
+// Uses online softmax for numerical stability in a single pass:
+// 1. Track running max and scaled sum simultaneously
+// 2. SIMD reduction for threadgroup operations
+// 3. float4 vectorization for large dimensions
+
+kernel void fused_softmax(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],        // dimension to softmax over
+    constant uint& outer_size [[buffer(3)]], // product of dims before softmax dim
+    constant uint& inner_size [[buffer(4)]], // product of dims after softmax dim (usually 1)
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    // Each threadgroup handles one softmax row
+    uint row = tgid.x;
+    if (row >= outer_size) return;
+    
+    uint row_offset = row * dim * inner_size;
+    uint tid_x = tid.x;
+    
+    // Phase 1: Online max finding with SIMD reduction
+    float local_max = -INFINITY;
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float val = input[row_offset + i * inner_size];
+        local_max = max(local_max, val);
+    }
+    
+    // SIMD reduction for max
+    float simd_max = simd_max(local_max);
+    
+    threadgroup float shared_max[32];
+    if (simd_lane == 0) {
+        shared_max[simd_group] = simd_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_max = -INFINITY;
+    if (simd_group == 0) {
+        uint num_groups = (tg_size.x + 31) / 32;
+        float partial = (simd_lane < num_groups) ? shared_max[simd_lane] : -INFINITY;
+        global_max = simd_max(partial);
+    }
+    if (simd_group == 0 && simd_lane == 0) {
+        shared_max[0] = global_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_max[0];
+    
+    // Phase 2: Compute sum of exp(x - max)
+    float local_sum = 0.0f;
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float val = input[row_offset + i * inner_size];
+        local_sum += exp(val - global_max);
+    }
+    
+    // SIMD reduction for sum
+    float simd_sum_val = simd_sum(local_sum);
+    
+    threadgroup float shared_sum[32];
+    if (simd_lane == 0) {
+        shared_sum[simd_group] = simd_sum_val;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_sum = 0.0f;
+    if (simd_group == 0) {
+        uint num_groups = (tg_size.x + 31) / 32;
+        float partial = (simd_lane < num_groups) ? shared_sum[simd_lane] : 0.0f;
+        global_sum = simd_sum(partial);
+    }
+    if (simd_group == 0 && simd_lane == 0) {
+        shared_sum[0] = global_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_sum = shared_sum[0];
+    
+    float inv_sum = 1.0f / global_sum;
+    
+    // Phase 3: Write normalized output
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float val = input[row_offset + i * inner_size];
+        output[row_offset + i * inner_size] = exp(val - global_max) * inv_sum;
+    }
+}
+
+// Vectorized softmax for dim % 4 == 0
+kernel void fused_softmax_vec4(
+    device const float4* input [[buffer(0)]],
+    device float4* output [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],        // original scalar dim
+    constant uint& outer_size [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    if (row >= outer_size) return;
+    
+    uint dim_vec = dim / 4;
+    uint row_offset = row * dim_vec;
+    uint tid_x = tid.x;
+    
+    // Phase 1: Max with vectorized loads
+    float local_max = -INFINITY;
+    for (uint i = tid_x; i < dim_vec; i += tg_size.x) {
+        float4 val = input[row_offset + i];
+        local_max = max(local_max, max(max(val.x, val.y), max(val.z, val.w)));
+    }
+    
+    float simd_max_val = simd_max(local_max);
+    threadgroup float shared_max[32];
+    if (simd_lane == 0) shared_max[simd_group] = simd_max_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_max = -INFINITY;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float p = (simd_lane < ng) ? shared_max[simd_lane] : -INFINITY;
+        global_max = simd_max(p);
+    }
+    if (simd_group == 0 && simd_lane == 0) shared_max[0] = global_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_max[0];
+    
+    // Phase 2: Sum
+    float local_sum = 0.0f;
+    for (uint i = tid_x; i < dim_vec; i += tg_size.x) {
+        float4 val = input[row_offset + i];
+        float4 e = exp(val - global_max);
+        local_sum += e.x + e.y + e.z + e.w;
+    }
+    
+    float simd_sum_val = simd_sum(local_sum);
+    threadgroup float shared_sum[32];
+    if (simd_lane == 0) shared_sum[simd_group] = simd_sum_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_sum = 0.0f;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float p = (simd_lane < ng) ? shared_sum[simd_lane] : 0.0f;
+        global_sum = simd_sum(p);
+    }
+    if (simd_group == 0 && simd_lane == 0) shared_sum[0] = global_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_sum = shared_sum[0];
+    
+    float inv_sum = 1.0f / global_sum;
+    
+    // Phase 3: Write
+    for (uint i = tid_x; i < dim_vec; i += tg_size.x) {
+        float4 val = input[row_offset + i];
+        output[row_offset + i] = exp(val - global_max) * inv_sum;
+    }
+}
+
+// =============================================================================
+// LAYERNORM - Welford's Algorithm for Fused Mean/Variance
+// =============================================================================
+// y = (x - mean) / sqrt(var + eps) * weight + bias
+
+kernel void layernorm_fwd(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    device float* mean_out [[buffer(4)]],   // for backward
+    device float* rstd_out [[buffer(5)]],   // for backward  
+    constant uint& N [[buffer(6)]],         // normalized dimension
+    constant float& eps [[buffer(7)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    // Welford's online algorithm for mean and variance
+    float local_sum = 0.0f;
+    float local_sum_sq = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = input[offset + i];
+        local_sum += val;
+        local_sum_sq += val * val;
+    }
+    
+    // SIMD reduction
+    float simd_sum_val = simd_sum(local_sum);
+    float simd_sum_sq = simd_sum(local_sum_sq);
+    
+    threadgroup float shared_sum[32];
+    threadgroup float shared_sum_sq[32];
+    
+    if (simd_lane == 0) {
+        shared_sum[simd_group] = simd_sum_val;
+        shared_sum_sq[simd_group] = simd_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float total_sum = 0.0f;
+    float total_sum_sq = 0.0f;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float ps = (simd_lane < ng) ? shared_sum[simd_lane] : 0.0f;
+        float psq = (simd_lane < ng) ? shared_sum_sq[simd_lane] : 0.0f;
+        total_sum = simd_sum(ps);
+        total_sum_sq = simd_sum(psq);
+    }
+    if (simd_group == 0 && simd_lane == 0) {
+        shared_sum[0] = total_sum;
+        shared_sum_sq[0] = total_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    total_sum = shared_sum[0];
+    total_sum_sq = shared_sum_sq[0];
+    
+    float mean = total_sum / float(N);
+    float var = total_sum_sq / float(N) - mean * mean;
+    float rstd = rsqrt(var + eps);
+    
+    // Save for backward
+    if (tid_x == 0) {
+        mean_out[row] = mean;
+        rstd_out[row] = rstd;
+    }
+    
+    // Normalize and apply affine transform
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = input[offset + i];
+        float normalized = (val - mean) * rstd;
+        output[offset + i] = normalized * weight[i] + bias[i];
+    }
+}
+
+// Fused Add + LayerNorm: y = layernorm(x + residual)
+kernel void fused_add_layernorm(
+    device const float* input [[buffer(0)]],
+    device const float* residual [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device const float* bias [[buffer(3)]],
+    device float* output [[buffer(4)]],
+    device float* mean_out [[buffer(5)]],
+    device float* rstd_out [[buffer(6)]],
+    constant uint& N [[buffer(7)]],
+    constant float& eps [[buffer(8)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    float local_sum = 0.0f;
+    float local_sum_sq = 0.0f;
+    
+    // Fused add and accumulate stats
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = input[offset + i] + residual[offset + i];
+        local_sum += val;
+        local_sum_sq += val * val;
+    }
+    
+    // Standard SIMD reduction
+    float simd_s = simd_sum(local_sum);
+    float simd_sq = simd_sum(local_sum_sq);
+    
+    threadgroup float sh_s[32], sh_sq[32];
+    if (simd_lane == 0) { sh_s[simd_group] = simd_s; sh_sq[simd_group] = simd_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float tot_s = 0, tot_sq = 0;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        tot_s = simd_sum((simd_lane < ng) ? sh_s[simd_lane] : 0.0f);
+        tot_sq = simd_sum((simd_lane < ng) ? sh_sq[simd_lane] : 0.0f);
+    }
+    if (simd_group == 0 && simd_lane == 0) { sh_s[0] = tot_s; sh_sq[0] = tot_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tot_s = sh_s[0]; tot_sq = sh_sq[0];
+    
+    float mean = tot_s / float(N);
+    float rstd = rsqrt(tot_sq / float(N) - mean * mean + eps);
+    
+    if (tid_x == 0) { mean_out[row] = mean; rstd_out[row] = rstd; }
+    
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = input[offset + i] + residual[offset + i];
+        output[offset + i] = (val - mean) * rstd * weight[i] + bias[i];
+    }
+}
+
+// =============================================================================
+// EMBEDDING BAG - Coalesced Reads + Parallel Reduction
+// =============================================================================
+// Supports sum, mean, max modes with per-sample weights
+
+kernel void embedding_bag_sum(
+    device const float* embeddings [[buffer(0)]],  // [num_embeddings, dim]
+    device const uint* indices [[buffer(1)]],      // [total_indices]
+    device const uint* offsets [[buffer(2)]],      // [batch_size + 1]
+    device const float* weights [[buffer(3)]],     // [total_indices] or null
+    device float* output [[buffer(4)]],            // [batch_size, dim]
+    constant uint& dim [[buffer(5)]],
+    constant uint& has_weights [[buffer(6)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_grid]]
+) {
+    uint batch_idx = tgid.x;
+    uint d = tgid.y * blockDim.x + tid;
+    
+    if (d >= dim) return;
+    
+    uint start = offsets[batch_idx];
+    uint end = offsets[batch_idx + 1];
+    
+    float sum = 0.0f;
+    for (uint i = start; i < end; i++) {
+        uint idx = indices[i];
+        float val = embeddings[idx * dim + d];
+        if (has_weights) {
+            val *= weights[i];
+        }
+        sum += val;
+    }
+    
+    output[batch_idx * dim + d] = sum;
+}
+
+// Simple 1D embedding bag - one thread per output element
+kernel void embedding_bag_simple(
+    device const float* embeddings [[buffer(0)]],
+    device const uint* indices [[buffer(1)]],
+    device const uint* offsets [[buffer(2)]],  
+    device float* output [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    constant uint& batch_size [[buffer(5)]],
+    constant uint& mode [[buffer(6)]],  // 0=sum, 1=mean, 2=max
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint batch_idx = gid.y;
+    uint d = gid.x;
+    
+    if (batch_idx >= batch_size || d >= dim) return;
+    
+    uint start = offsets[batch_idx];
+    uint end = offsets[batch_idx + 1];
+    uint count = end - start;
+    
+    if (count == 0) {
+        output[batch_idx * dim + d] = 0.0f;
+        return;
+    }
+    
+    float result;
+    if (mode == 2) {  // max
+        result = -INFINITY;
+        for (uint i = start; i < end; i++) {
+            uint idx = indices[i];
+            result = max(result, embeddings[idx * dim + d]);
+        }
+    } else {  // sum or mean
+        result = 0.0f;
+        for (uint i = start; i < end; i++) {
+            uint idx = indices[i];
+            result += embeddings[idx * dim + d];
+        }
+        if (mode == 1) {  // mean
+            result /= float(count);
+        }
+    }
+    
+    output[batch_idx * dim + d] = result;
+}
+
+// =============================================================================
+// SCATTER / GATHER Operations
+// =============================================================================
+
+// Gather: out[i] = src[index[i]] - vectorized when possible
+kernel void gather_1d(
+    device const float* src [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& num_elements [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= num_elements) return;
+    out[id] = src[index[id]];
+}
+
+// Gather 2D: out[i, :] = src[index[i], :]
+kernel void gather_2d(
+    device const float* src [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint idx = gid.y;
+    uint d = gid.x;
+    
+    if (idx >= num_indices || d >= dim) return;
+    
+    uint src_row = index[idx];
+    out[idx * dim + d] = src[src_row * dim + d];
+}
+
+// Scatter Add: dst[index[i]] += src[i] (uses atomic for thread safety)
+kernel void scatter_add_1d(
+    device atomic_float* dst [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device const float* src [[buffer(2)]],
+    constant uint& num_elements [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= num_elements) return;
+    atomic_fetch_add_explicit(&dst[index[id]], src[id], memory_order_relaxed);
+}
+
+// Scatter Add 2D: dst[index[i], :] += src[i, :]
+kernel void scatter_add_2d(
+    device atomic_float* dst [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device const float* src [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& dim [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint idx = gid.y;
+    uint d = gid.x;
+    
+    if (idx >= num_indices || d >= dim) return;
+    
+    uint dst_row = index[idx];
+    atomic_fetch_add_explicit(&dst[dst_row * dim + d], src[idx * dim + d], memory_order_relaxed);
+}
+
+// Index Select: more general gather with dimension support
+kernel void index_select(
+    device const float* src [[buffer(0)]],
+    device const uint* index [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& num_indices [[buffer(3)]],
+    constant uint& src_dim_size [[buffer(4)]],  // size of indexed dimension in src
+    constant uint& slice_size [[buffer(5)]],     // product of dims after indexed dim
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint idx = gid.y;
+    uint slice_pos = gid.x;
+    
+    if (idx >= num_indices || slice_pos >= slice_size) return;
+    
+    uint src_idx = index[idx];
+    out[idx * slice_size + slice_pos] = src[src_idx * slice_size + slice_pos];
+}

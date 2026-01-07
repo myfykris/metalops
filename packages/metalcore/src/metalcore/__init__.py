@@ -29,6 +29,12 @@ from .optim import MetalAdamW
 from .activations import metal_gelu, metal_silu, MetalGELU, MetalSiLU
 from .sdpa import metal_scaled_dot_product_attention
 from .comfy_patch import patch_comfy, unpatch_comfy, is_patched
+from .ops import (
+    fused_softmax, MetalSoftmax,
+    layer_norm, MetalLayerNorm,
+    embedding_bag, MetalEmbeddingBag,
+    gather, scatter_add, index_select
+)
 
 # High-impact ops (direct backend exports)
 try:
@@ -119,4 +125,14 @@ __all__ = [
     "patch_comfy",
     "unpatch_comfy",
     "is_patched",
+    # High-performance ops
+    "fused_softmax",
+    "MetalSoftmax",
+    "layer_norm",
+    "MetalLayerNorm",
+    "embedding_bag",
+    "MetalEmbeddingBag",
+    "gather",
+    "scatter_add",
+    "index_select",
 ]
