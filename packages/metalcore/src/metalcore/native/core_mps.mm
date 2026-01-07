@@ -165,6 +165,16 @@ struct CoreKernels {
     id<MTLComputePipelineState> rmsnormBwdDwHalfPSO = nil;
     id<MTLFunction> adamwStepHalf = nil;
     id<MTLComputePipelineState> adamwStepHalfPSO = nil;
+    id<MTLFunction> adamwStepHalfScalar = nil;
+    id<MTLComputePipelineState> adamwStepHalfScalarPSO = nil;
+    id<MTLFunction> adamwStepHalfIlp4 = nil;
+    id<MTLComputePipelineState> adamwStepHalfIlp4PSO = nil;
+    id<MTLFunction> adamwStepBfloat = nil;
+    id<MTLComputePipelineState> adamwStepBfloatPSO = nil;
+    id<MTLFunction> adamwStepBfloatScalar = nil;
+    id<MTLComputePipelineState> adamwStepBfloatScalarPSO = nil;
+    id<MTLFunction> adamwStepBfloatIlp4 = nil;
+    id<MTLComputePipelineState> adamwStepBfloatIlp4PSO = nil;
     
     // Activation Kernels (float)
     id<MTLFunction> geluFwd = nil;
@@ -519,6 +529,22 @@ void load_core_kernels() {
         if (kernels.rmsnormBwdDxHalf) kernels.rmsnormBwdDxHalfPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDxHalf error:&error];
         if (kernels.rmsnormBwdDwHalf) kernels.rmsnormBwdDwHalfPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormBwdDwHalf error:&error];
         if (kernels.adamwStepHalf) kernels.adamwStepHalfPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepHalf error:&error];
+        
+        // Half precision scalar AdamW (for tail handling)
+        kernels.adamwStepHalfScalar = [coreLib newFunctionWithName:@"adamw_step_half_scalar"];
+        if (kernels.adamwStepHalfScalar) kernels.adamwStepHalfScalarPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepHalfScalar error:&error];
+        
+        // Half precision ILP=4 (for large tensors)
+        kernels.adamwStepHalfIlp4 = [coreLib newFunctionWithName:@"adamw_step_half_ilp4"];
+        if (kernels.adamwStepHalfIlp4) kernels.adamwStepHalfIlp4PSO = [device newComputePipelineStateWithFunction:kernels.adamwStepHalfIlp4 error:&error];
+        
+        // BFloat16 AdamW (requires Metal 3.1+)
+        kernels.adamwStepBfloat = [coreLib newFunctionWithName:@"adamw_step_bfloat"];
+        kernels.adamwStepBfloatScalar = [coreLib newFunctionWithName:@"adamw_step_bfloat_scalar"];
+        kernels.adamwStepBfloatIlp4 = [coreLib newFunctionWithName:@"adamw_step_bfloat_ilp4"];
+        if (kernels.adamwStepBfloat) kernels.adamwStepBfloatPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepBfloat error:&error];
+        if (kernels.adamwStepBfloatScalar) kernels.adamwStepBfloatScalarPSO = [device newComputePipelineStateWithFunction:kernels.adamwStepBfloatScalar error:&error];
+        if (kernels.adamwStepBfloatIlp4) kernels.adamwStepBfloatIlp4PSO = [device newComputePipelineStateWithFunction:kernels.adamwStepBfloatIlp4 error:&error];
         
         // Activation Kernels
         kernels.geluFwd = [coreLib newFunctionWithName:@"gelu_fwd"];
@@ -2460,34 +2486,67 @@ void adamw_step_metal(
     
     TORCH_CHECK(params.is_contiguous(), "params must be contig");
     TORCH_CHECK(grads.is_contiguous(), "grads must be contig");
+    TORCH_CHECK(exp_avg.is_contiguous(), "exp_avg must be contig");
+    TORCH_CHECK(exp_avg_sq.is_contiguous(), "exp_avg_sq must be contig");
     
     int64_t numel = params.numel();
+    at::ScalarType dtype = params.scalar_type();
+    int64_t elem_size = params.element_size();
     
-    // We vectorize by 4 (float4), so launch numel/4 threads
-    // Ensure tensors are float32
+    // Optimizer states MUST be float32 for numerical stability
+    TORCH_CHECK(exp_avg.scalar_type() == at::kFloat, "exp_avg must be float32");
+    TORCH_CHECK(exp_avg_sq.scalar_type() == at::kFloat, "exp_avg_sq must be float32");
     
-    if (!kernels.adamwStepPSO) return;
+    // Select kernel PSOs based on dtype
+    id<MTLComputePipelineState> vecPSO = nil;
+    id<MTLComputePipelineState> scalarPSO = nil;
+    id<MTLComputePipelineState> ilp4PSO = nil;  // For large tensors (all dtypes)
+    
+    if (dtype == at::kFloat) {
+        vecPSO = kernels.adamwStepPSO;
+        scalarPSO = kernels.adamwStepScalarPSO;
+        ilp4PSO = kernels.adamwStepIlp4PSO;
+    } else if (dtype == at::kHalf) {
+        vecPSO = kernels.adamwStepHalfPSO;
+        scalarPSO = kernels.adamwStepHalfScalarPSO;
+        ilp4PSO = kernels.adamwStepHalfIlp4PSO;
+    } else if (dtype == at::kBFloat16) {
+        vecPSO = kernels.adamwStepBfloatPSO;
+        scalarPSO = kernels.adamwStepBfloatScalarPSO;
+        ilp4PSO = kernels.adamwStepBfloatIlp4PSO;
+    } else {
+        TORCH_CHECK(false, "adamw_step: unsupported dtype ", dtype, ". Supported: float32, float16, bfloat16");
+    }
+    
+    if (!vecPSO) {
+        TORCH_CHECK(false, "adamw_step: kernel not available for dtype ", dtype);
+        return;
+    }
     
     // Split into vectorized (divisible by 4) and scalar tail
     int64_t numel_vec = numel / 4;
     int64_t tail = numel % 4;
     
-    // Use ILP4 kernel for large tensors (>256KB = 64K float4s)
-    bool use_ilp4 = kernels.adamwStepIlp4PSO && (numel_vec >= 65536);
+    // Use ILP4 kernel for large tensors (>256KB = 64K vec4s for float, 128K vec4s for half/bf16)
+    // Threshold: 65536 vec4 elements = 256KB for float32, 128KB for half/bf16
+    bool use_ilp4 = ilp4PSO && (numel_vec >= 65536);
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
-        // 1. Vectorized Body (float4)
+        // For half/bfloat: params are 2 bytes, but exp_avg/exp_avg_sq are 4 bytes
+        int64_t state_elem_size = 4;  // exp_avg and exp_avg_sq are always float32
+        
+        // 1. Vectorized Body
         if (numel_vec > 0) {
             if (use_ilp4) {
-                // ILP=4 kernel: each thread processes 4 float4 vectors
-                [encoder setComputePipelineState:kernels.adamwStepIlp4PSO];
-                [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*4 atIndex:0];
-                [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*4 atIndex:1];
-                [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*4 atIndex:2];
-                [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*4 atIndex:3];
+                // ILP=4 kernel: each thread processes 4 float4 vectors (float32 only)
+                [encoder setComputePipelineState:ilp4PSO];
+                [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*elem_size atIndex:0];
+                [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*elem_size atIndex:1];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*state_elem_size atIndex:2];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*state_elem_size atIndex:3];
                 
                 [encoder setBytes:&lr length:4 atIndex:4];
                 [encoder setBytes:&beta1 length:4 atIndex:5];
@@ -2499,20 +2558,19 @@ void adamw_step_metal(
                 uint32_t numel_u = (uint32_t)numel_vec;
                 [encoder setBytes:&numel_u length:4 atIndex:11];
                 
-                // With ILP=4, each thread processes 4 elements, so we need numel/4 threads
-                NSUInteger num_threads = (NSUInteger)((numel_vec + 3) / 4);  // Divide by ILP
+                NSUInteger num_threads = (NSUInteger)((numel_vec + 3) / 4);
                 NSUInteger tg_size = std::min((NSUInteger)256, num_threads);
                 NSUInteger num_groups = (num_threads + tg_size - 1) / tg_size;
                 
                 [encoder dispatchThreadgroups:MTLSizeMake(num_groups, 1, 1) 
                         threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
             } else {
-                // Original kernel: one float4 per thread
-                [encoder setComputePipelineState:kernels.adamwStepPSO];
-                [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*4 atIndex:0];
-                [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*4 atIndex:1];
-                [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*4 atIndex:2];
-                [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*4 atIndex:3];
+                // Standard vectorized kernel: one vec4 per thread
+                [encoder setComputePipelineState:vecPSO];
+                [encoder setBuffer:getMTLBufferStorage(params) offset:params.storage_offset()*elem_size atIndex:0];
+                [encoder setBuffer:getMTLBufferStorage(grads) offset:grads.storage_offset()*elem_size atIndex:1];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:exp_avg.storage_offset()*state_elem_size atIndex:2];
+                [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:exp_avg_sq.storage_offset()*state_elem_size atIndex:3];
                 
                 [encoder setBytes:&lr length:4 atIndex:4];
                 [encoder setBytes:&beta1 length:4 atIndex:5];
@@ -2523,32 +2581,26 @@ void adamw_step_metal(
                 [encoder setBytes:&correction2 length:4 atIndex:10];
                 
                 NSUInteger num_threads = (NSUInteger)numel_vec;
-                NSUInteger tg_size = std::min((NSUInteger)num_threads, (NSUInteger)256);
+                NSUInteger tg_size = std::min(num_threads, (NSUInteger)256);
                 NSUInteger num_groups = (num_threads + tg_size - 1) / tg_size;
                 
                 [encoder dispatchThreadgroups:MTLSizeMake(num_groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
             }
         }
         
-        // 2. Scalar Tail (float)
-        if (tail > 0 && kernels.adamwStepScalarPSO) {
-             [encoder setComputePipelineState:kernels.adamwStepScalarPSO];
-             // Offset by numel_vec * 4 (float4 size) = numel_vec * 16 bytes? 
-             // No, offset is in bytes. X.storage_offset() is in elements.
-             // We need to pointer arithmetic.
-             // Actually, easier to dispatch scalar kernel with `id + offset` or just launch threads for [numel_vec*4 ... numel]
-             // Metal kernel uses `id` as index.
-             // Let's just launch `tail` threads and pass an offset.
-             // But my scalar kernel takes `id [[thread_position_in_grid]]` and accesses params[id].
-             // So I need to set the buffer offset to point to the tail.
+        // 2. Scalar Tail
+        if (tail > 0 && scalarPSO) {
+             [encoder setComputePipelineState:scalarPSO];
              
+             // Offset to tail elements
              int64_t offset_elems = numel_vec * 4;
-             int64_t offset_bytes = offset_elems * 4; // 4 bytes per float
+             int64_t param_offset_bytes = offset_elems * elem_size;
+             int64_t state_offset_bytes = offset_elems * state_elem_size;
              
-             [encoder setBuffer:getMTLBufferStorage(params) offset:(params.storage_offset()*4 + offset_bytes) atIndex:0];
-             [encoder setBuffer:getMTLBufferStorage(grads) offset:(grads.storage_offset()*4 + offset_bytes) atIndex:1];
-             [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:(exp_avg.storage_offset()*4 + offset_bytes) atIndex:2];
-             [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:(exp_avg_sq.storage_offset()*4 + offset_bytes) atIndex:3];
+             [encoder setBuffer:getMTLBufferStorage(params) offset:(params.storage_offset()*elem_size + param_offset_bytes) atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(grads) offset:(grads.storage_offset()*elem_size + param_offset_bytes) atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(exp_avg) offset:(exp_avg.storage_offset()*state_elem_size + state_offset_bytes) atIndex:2];
+             [encoder setBuffer:getMTLBufferStorage(exp_avg_sq) offset:(exp_avg_sq.storage_offset()*state_elem_size + state_offset_bytes) atIndex:3];
              
              [encoder setBytes:&lr length:4 atIndex:4];
              [encoder setBytes:&beta1 length:4 atIndex:5];
@@ -2560,13 +2612,15 @@ void adamw_step_metal(
              
              [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         } else if (tail > 0) {
-            printf("metalcore: Warning - No scalar AdamW kernel, tail ignored!\n");
+            // Fallback: process tail elements via separate call (shouldn't happen if all kernels loaded)
+            printf("metalcore: Warning - No scalar AdamW kernel for dtype, tail %lld elements ignored!\n", tail);
         }
         
         [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
 }
+
 
 // -----------------------------------------------------------------------------
 // Batched Cholesky Decomposition

@@ -24,6 +24,7 @@
 - **Atomics in Backward**: SDPA backward uses `atomic_fetch_add`, which is slower but thread-safe.
 - **Causal Masking**: Initialize p_reg to -INFINITY for proper mask handling.
 - **AdamW Tail Handling**: Use scalar kernel for (numel % 4) tail elements to avoid OOB.
+- **AdamW Mixed-Precision**: Params can be bf16/fp16 for bandwidth, but **optimizer states (exp_avg, exp_avg_sq) MUST be float32** for numerical stability. The Python wrapper should use `dtype=torch.float32` explicitly.
 
 ## Performance Tuning
 - **Batched > Single**: Always prefer batched ops for GPU utilization

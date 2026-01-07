@@ -715,3 +715,280 @@ kernel void adamw_step_half(
     exp_avg[id] = m;
     exp_avg_sq[id] = v;
 }
+
+// -----------------------------------------------------------------------------
+// AdamW Half Precision - Scalar (for tail handling)
+// -----------------------------------------------------------------------------
+
+kernel void adamw_step_half_scalar(
+    device half* params [[buffer(0)]],
+    device const half* grads [[buffer(1)]],
+    device float* exp_avg [[buffer(2)]],
+    device float* exp_avg_sq [[buffer(3)]],
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    uint id [[thread_position_in_grid]]
+) {
+    float p = float(params[id]);
+    float g = float(grads[id]);
+    float m = exp_avg[id];
+    float v = exp_avg_sq[id];
+    
+    // Weight decay (decoupled)
+    p = p - lr * weight_decay * p;
+    
+    // Update moments
+    m = beta1 * m + (1.0f - beta1) * g;
+    v = beta2 * v + (1.0f - beta2) * (g * g);
+    
+    // Bias correction
+    float m_hat = m / bias_correction1;
+    float v_hat = v / bias_correction2;
+    
+    // Update param
+    float denom = sqrt(v_hat) + eps;
+    p = p - lr * (m_hat / denom);
+    
+    // Write back
+    params[id] = half(p);
+    exp_avg[id] = m;
+    exp_avg_sq[id] = v;
+}
+
+// -----------------------------------------------------------------------------
+// AdamW Half Precision - ILP=4 (DeepSpeed-style, for large tensors)
+// Process 4 half4 vectors per thread to hide memory latency
+// -----------------------------------------------------------------------------
+
+kernel void adamw_step_half_ilp4(
+    device half4* params [[buffer(0)]],
+    device const half4* grads [[buffer(1)]],
+    device float4* exp_avg [[buffer(2)]],
+    device float4* exp_avg_sq [[buffer(3)]],
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    constant uint& numel [[buffer(11)]],
+    uint id [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]
+) {
+    constexpr int ILP = 4;
+    float one_minus_beta1 = 1.0f - beta1;
+    float one_minus_beta2 = 1.0f - beta2;
+    float eps_sq = eps * eps;  // For rsqrt optimization
+    
+    for (uint base = id * ILP; base < numel; base += threads * ILP) {
+        // Load all values into registers
+        float4 r_p[ILP], r_g[ILP], r_m[ILP], r_v[ILP];
+        
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                r_p[ii] = float4(params[idx]);
+                r_g[ii] = float4(grads[idx]);
+                r_m[ii] = exp_avg[idx];
+                r_v[ii] = exp_avg_sq[idx];
+            }
+        }
+        
+        // Compute updates in registers
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                // Weight decay
+                r_p[ii] = r_p[ii] - lr * weight_decay * r_p[ii];
+                
+                // Update moments
+                r_m[ii] = beta1 * r_m[ii] + one_minus_beta1 * r_g[ii];
+                r_v[ii] = beta2 * r_v[ii] + one_minus_beta2 * (r_g[ii] * r_g[ii]);
+                
+                // Bias correction + update (rsqrt optimization)
+                float4 m_hat = r_m[ii] / bias_correction1;
+                float4 v_hat = r_v[ii] / bias_correction2;
+                r_p[ii] = r_p[ii] - lr * m_hat * rsqrt(v_hat + eps_sq);
+            }
+        }
+        
+        // Write back
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                params[idx] = half4(r_p[ii]);
+                exp_avg[idx] = r_m[ii];
+                exp_avg_sq[idx] = r_v[ii];
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// AdamW BFloat16 Precision
+
+// Note: Optimizer state (exp_avg, exp_avg_sq) kept in float for stability
+// bfloat16 requires Metal 3.1+ (macOS 14+)
+// -----------------------------------------------------------------------------
+
+#if __METAL_VERSION__ >= 310
+
+kernel void adamw_step_bfloat(
+    device bfloat4* params [[buffer(0)]],
+    device const bfloat4* grads [[buffer(1)]],
+    device float4* exp_avg [[buffer(2)]],   // Keep in float32
+    device float4* exp_avg_sq [[buffer(3)]],// Keep in float32
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    uint id [[thread_position_in_grid]]
+) {
+    // Load params and grads, convert to float for computation
+    float4 p = float4(params[id]);
+    float4 g = float4(grads[id]);
+    float4 m = exp_avg[id];
+    float4 v = exp_avg_sq[id];
+    
+    // Weight decay (decoupled)
+    p = p - lr * weight_decay * p;
+    
+    // Update moments (in float)
+    m = beta1 * m + (1.0f - beta1) * g;
+    v = beta2 * v + (1.0f - beta2) * (g * g);
+    
+    // Bias correction
+    float4 m_hat = m / bias_correction1;
+    float4 v_hat = v / bias_correction2;
+    
+    // Update param
+    float4 denom = sqrt(v_hat) + eps;
+    p = p - lr * (m_hat / denom);
+    
+    // Write back (params in bfloat, state in float)
+    params[id] = bfloat4(p);
+    exp_avg[id] = m;
+    exp_avg_sq[id] = v;
+}
+
+// BFloat16 Scalar (for tail handling)
+kernel void adamw_step_bfloat_scalar(
+    device bfloat* params [[buffer(0)]],
+    device const bfloat* grads [[buffer(1)]],
+    device float* exp_avg [[buffer(2)]],
+    device float* exp_avg_sq [[buffer(3)]],
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    uint id [[thread_position_in_grid]]
+) {
+    float p = float(params[id]);
+    float g = float(grads[id]);
+    float m = exp_avg[id];
+    float v = exp_avg_sq[id];
+    
+    // Weight decay (decoupled)
+    p = p - lr * weight_decay * p;
+    
+    // Update moments
+    m = beta1 * m + (1.0f - beta1) * g;
+    v = beta2 * v + (1.0f - beta2) * (g * g);
+    
+    // Bias correction
+    float m_hat = m / bias_correction1;
+    float v_hat = v / bias_correction2;
+    
+    // Update param
+    float denom = sqrt(v_hat) + eps;
+    p = p - lr * (m_hat / denom);
+    
+    // Write back
+    params[id] = bfloat(p);
+    exp_avg[id] = m;
+    exp_avg_sq[id] = v;
+}
+
+// -----------------------------------------------------------------------------
+// AdamW BFloat16 - ILP=4 (DeepSpeed-style, for large tensors)
+// Process 4 bfloat4 vectors per thread to hide memory latency
+// -----------------------------------------------------------------------------
+
+kernel void adamw_step_bfloat_ilp4(
+    device bfloat4* params [[buffer(0)]],
+    device const bfloat4* grads [[buffer(1)]],
+    device float4* exp_avg [[buffer(2)]],
+    device float4* exp_avg_sq [[buffer(3)]],
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    constant uint& numel [[buffer(11)]],
+    uint id [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]
+) {
+    constexpr int ILP = 4;
+    float one_minus_beta1 = 1.0f - beta1;
+    float one_minus_beta2 = 1.0f - beta2;
+    float eps_sq = eps * eps;  // For rsqrt optimization
+    
+    for (uint base = id * ILP; base < numel; base += threads * ILP) {
+        // Load all values into registers
+        float4 r_p[ILP], r_g[ILP], r_m[ILP], r_v[ILP];
+        
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                r_p[ii] = float4(params[idx]);
+                r_g[ii] = float4(grads[idx]);
+                r_m[ii] = exp_avg[idx];
+                r_v[ii] = exp_avg_sq[idx];
+            }
+        }
+        
+        // Compute updates in registers
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                // Weight decay
+                r_p[ii] = r_p[ii] - lr * weight_decay * r_p[ii];
+                
+                // Update moments
+                r_m[ii] = beta1 * r_m[ii] + one_minus_beta1 * r_g[ii];
+                r_v[ii] = beta2 * r_v[ii] + one_minus_beta2 * (r_g[ii] * r_g[ii]);
+                
+                // Bias correction + update (rsqrt optimization)
+                float4 m_hat = r_m[ii] / bias_correction1;
+                float4 v_hat = r_v[ii] / bias_correction2;
+                r_p[ii] = r_p[ii] - lr * m_hat * rsqrt(v_hat + eps_sq);
+            }
+        }
+        
+        // Write back
+        for (int ii = 0; ii < ILP; ii++) {
+            uint idx = base + ii;
+            if (idx < numel) {
+                params[idx] = bfloat4(r_p[ii]);
+                exp_avg[idx] = r_m[ii];
+                exp_avg_sq[idx] = r_v[ii];
+            }
+        }
+    }
+}
+
+#endif // __METAL_VERSION__ >= 310

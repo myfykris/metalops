@@ -84,7 +84,7 @@ def is_metal_sdpa_enabled():
     """Check if Metal SDPA is currently enabled."""
     return _sdpa_enabled
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 __all__ = [
     "trsm",
     "trsm_batched", 

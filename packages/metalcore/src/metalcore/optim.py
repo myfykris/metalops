@@ -44,8 +44,11 @@ class MetalAdamW(Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state['step'] = 0
-                        state['exp_avg'] = torch.zeros_like(p, memory_format=torch.preserve_format)
-                        state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                        # CRITICAL: Always keep optimizer states in float32 for numerical stability
+                        # This is essential for bf16/fp16 training - states accumulate small values
+                        # that would underflow in reduced precision
+                        state['exp_avg'] = torch.zeros_like(p, memory_format=torch.preserve_format, dtype=torch.float32)
+                        state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format, dtype=torch.float32)
                     
                     state['step'] += 1
                     
