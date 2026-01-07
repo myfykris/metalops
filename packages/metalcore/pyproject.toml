@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metalcore"
-version = "0.1.9"
+# Version is managed in src/metalcore/__init__.py
+# setup.py reads it dynamically
+dynamic = ["version"]
 description = "Foundational Metal Linear Algebra Primitives for PyTorch"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -3,6 +3,19 @@ from torch.utils.cpp_extension import BuildExtension, CppExtension
 import os
 import subprocess
 import sys
+import re
+
+# Read version from __init__.py (single source of truth)
+def get_version():
+    init_path = os.path.join("src", "metalcore", "__init__.py")
+    with open(init_path, "r") as f:
+        content = f.read()
+    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+    if match:
+        return match.group(1)
+    raise RuntimeError("Could not find __version__ in __init__.py")
+
+VERSION = get_version()
 
 class CustomBuildExtension(BuildExtension):
     def build_extensions(self):
@@ -40,7 +53,7 @@ class CustomBuildExtension(BuildExtension):
 
 setup(
     name='metalcore',
-    version='0.1.9',
+    version=VERSION,
     author='Kris Bailey',
     author_email='kris@krisbailey.com',
     description='Foundational Metal Linear Algebra Primitives for PyTorch',
