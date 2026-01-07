@@ -87,12 +87,12 @@ def color_ratio(ratio, is_timing=True):
         elif ratio <= 0.7:
             return "🟢"  # GPU wins moderate
         elif ratio <= 1.3:
-            return "⚪"  # Close
+            return "🔵"  # Close
         elif ratio <= 3.0:
-            return "🟠"  # CPU wins moderate
+            return "⚪"  # CPU wins moderate
         else:
-            return "🔴"  # CPU wins big (3x+ faster)
-    return "⚪"
+            return "🟠"  # CPU wins big (3x+ faster)
+    return "🔵"
 
 def format_time(ms):
     """Format time in appropriate units."""
@@ -370,7 +370,7 @@ class BenchmarkResults:
             "",
             f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
             "",
-            "**Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | ⚪ Close | 🟠 CPU wins | 🔴 CPU wins big (>3x)",
+            "**Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | 🔵 Close | ⚪ CPU wins | 🟠 CPU wins big (>3x)",
             "",
         ]
         
@@ -1903,7 +1903,7 @@ def main():
                 "",
                 f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
                 "",
-                "**Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | ⚪ Close | 🟠 CPU wins | 🔴 CPU wins big (>3x)",
+                "**Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | 🔵 Close | ⚪ CPU wins | 🟠 CPU wins big (>3x)",
                 "",
             ]
             

@@ -24,12 +24,12 @@ def color_ratio(ratio: float, is_timing: bool = True) -> str:
         elif ratio <= 0.7:
             return "🟢"  # GPU wins moderate
         elif ratio <= 1.3:
-            return "⚪"  # Close
+            return "🔵"  # Close
         elif ratio <= 3.0:
-            return "🟠"  # CPU wins moderate
+            return "⚪"  # CPU wins moderate
         else:
-            return "🔴"  # CPU wins big (3x+ faster)
-    return "⚪"
+            return "🟠"  # CPU wins big (physics favors CPU)
+    return "🔵"
 
 
 def format_time(ms: float) -> str:
