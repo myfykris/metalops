@@ -1420,69 +1420,80 @@ kernel void cholesky_solve_batched_kernel(
 #include <metal_stdlib>
 using namespace metal;
 
-// constant float EPSILON = 1e-6; // Removed
-
-inline float get_epsilon(float) { return 1e-6; }
-inline half get_epsilon(half) { return (half)1e-3; } // Relaxed for half
+// Epsilon helpers for different dtypes (inline for template-style dispatch)
+inline float get_epsilon(float) { return 1e-6f; }
+inline half get_epsilon(half) { return (half)1e-3f; }
 #if __METAL_VERSION__ >= 310
-inline bfloat get_epsilon(bfloat) { return (bfloat)1e-3; } // Relaxed for bfloat
+inline bfloat get_epsilon(bfloat) { return (bfloat)1e-3f; }
 #endif
 
-// Helper: SIMD Reduction for float
-inline float simd_reduction(float val) {
-    val += simd_shuffle_down(val, 16);
-    val += simd_shuffle_down(val, 8);
-    val += simd_shuffle_down(val, 4);
-    val += simd_shuffle_down(val, 2);
-    val += simd_shuffle_down(val, 1);
-    return val;
-}
+// =============================================================================
+// SIMD Reduction Macros (guaranteed zero overhead)
+// =============================================================================
+// Note: SIMD_REDUCE_SUM modifies val in-place and returns final sum
 
-// Helper: SIMD Reduction for half
-inline half simd_reduction(half val) {
-    val += simd_shuffle_down(val, 16);
-    val += simd_shuffle_down(val, 8);
-    val += simd_shuffle_down(val, 4);
-    val += simd_shuffle_down(val, 2);
-    val += simd_shuffle_down(val, 1);
-    return val;
-}
+#define SIMD_REDUCE_SUM(val) \
+    ((val) += simd_shuffle_down((val), 16), \
+     (val) += simd_shuffle_down((val), 8), \
+     (val) += simd_shuffle_down((val), 4), \
+     (val) += simd_shuffle_down((val), 2), \
+     (val) += simd_shuffle_down((val), 1), \
+     (val))
+
+// =============================================================================
+// BFloat16 Helper Macros (requires Metal 3.1+)
+// =============================================================================
+#if __METAL_VERSION__ >= 310
+
+// bfloat doesn't have native simd_shuffle_down, so cast via ushort
+#define SIMD_SHUFFLE_DOWN_BFLOAT(val, delta) \
+    as_type<bfloat>(simd_shuffle_down(as_type<ushort>(val), (delta)))
+
+// SIMD reduction for bfloat (uses the bfloat shuffle macro)
+#define SIMD_REDUCE_SUM_BFLOAT(val) \
+    ((val) += SIMD_SHUFFLE_DOWN_BFLOAT((val), 16), \
+     (val) += SIMD_SHUFFLE_DOWN_BFLOAT((val), 8), \
+     (val) += SIMD_SHUFFLE_DOWN_BFLOAT((val), 4), \
+     (val) += SIMD_SHUFFLE_DOWN_BFLOAT((val), 2), \
+     (val) += SIMD_SHUFFLE_DOWN_BFLOAT((val), 1), \
+     (val))
+
+// Dot product for bfloat4
+#define DOT_BFLOAT4(a, b) ((a).x * (b).x + (a).y * (b).y + (a).z * (b).z + (a).w * (b).w)
+
+// Dot product returning float (mixed precision)
+#define DOT_BFLOAT4_AS_FLOAT(a, b) \
+    ((float)(a).x * (float)(b).x + (float)(a).y * (float)(b).y + \
+     (float)(a).z * (float)(b).z + (float)(a).w * (float)(b).w)
+
+#endif // __METAL_VERSION__ >= 310
+
+// =============================================================================
+// Half/Float Dot Product Macros
+// =============================================================================
+#define DOT_HALF4_AS_FLOAT(a, b) \
+    ((float)(a).x * (float)(b).x + (float)(a).y * (float)(b).y + \
+     (float)(a).z * (float)(b).z + (float)(a).w * (float)(b).w)
+
+// For float4, just use Metal's built-in dot()
+#define DOT_FLOAT4(a, b) dot((a), (b))
+
+// =============================================================================
+// Inline Function Wrappers (for polymorphic template macro compatibility)
+// =============================================================================
+// These call the macros but provide function overloading for template-style usage
+
+inline float simd_reduction(float val) { return SIMD_REDUCE_SUM(val); }
+inline half simd_reduction(half val) { return SIMD_REDUCE_SUM(val); }
 
 #if __METAL_VERSION__ >= 310
-// Helper: SIMD Shuffle for bfloat (cast to ushort)
-inline bfloat simd_shuffle_down(bfloat val, ushort delta) {
-    return as_type<bfloat>(simd_shuffle_down(as_type<ushort>(val), delta));
-}
-
-// Helper: SIMD Reduction for bfloat
-inline bfloat simd_reduction(bfloat val) {
-    val += simd_shuffle_down(val, 16);
-    val += simd_shuffle_down(val, 8);
-    val += simd_shuffle_down(val, 4);
-    val += simd_shuffle_down(val, 2);
-    val += simd_shuffle_down(val, 1);
-    return val;
-}
-
-// Helper: Dot Product for bfloat4
-inline bfloat dot(vec<bfloat, 4> a, vec<bfloat, 4> b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
-}
-
-// Helper: Dot Product for bfloat4 returning float (Mixed Precision)
-inline float dot_float(vec<bfloat, 4> a, vec<bfloat, 4> b) {
-    return (float)a.x * (float)b.x + (float)a.y * (float)b.y + (float)a.z * (float)b.z + (float)a.w * (float)b.w;
-}
+inline bfloat simd_reduction(bfloat val) { return SIMD_REDUCE_SUM_BFLOAT(val); }
+inline bfloat dot(vec<bfloat, 4> a, vec<bfloat, 4> b) { return DOT_BFLOAT4(a, b); }
+inline float dot_float(vec<bfloat, 4> a, vec<bfloat, 4> b) { return DOT_BFLOAT4_AS_FLOAT(a, b); }
 #endif
 
-// Helper: Dot Product overloads for Template Macro
-inline float dot_float(vec<float, 4> a, vec<float, 4> b) {
-    return dot(a, b); // float * float -> float is standard
-}
-
-inline float dot_float(vec<half, 4> a, vec<half, 4> b) {
-    return (float)a.x * (float)b.x + (float)a.y * (float)b.y + (float)a.z * (float)b.z + (float)a.w * (float)b.w;
-}
+inline float dot_float(vec<float, 4> a, vec<float, 4> b) { return DOT_FLOAT4(a, b); }
+inline float dot_float(vec<half, 4> a, vec<half, 4> b) { return DOT_HALF4_AS_FLOAT(a, b); }
 
 // Struct for ICB Uniforms (defined globally)
 struct ICBUniforms {

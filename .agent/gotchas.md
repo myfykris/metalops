@@ -40,3 +40,9 @@ Key scripts in this repo:
 - **Shared Memory**: Use for N ≤ 64, reduces VRAM round-trips
 - **256-1024 threads**: Sweet spot for most reductions
 - **float4 Vectorization**: 2-3x bandwidth improvement for elementwise ops
+
+## CI Testing Limitations
+- **GitHub Actions has NO MPS**: `macos-latest` runners lack Metal GPU access
+- **Tests MUST be import-only**: Don't add tests that call Metal kernels
+- **Local testing only**: Run `pytest` and `adamw_stress_test.py` on Apple Silicon
+- **See**: `tests/test_imports.py` header comments for detailed guidance

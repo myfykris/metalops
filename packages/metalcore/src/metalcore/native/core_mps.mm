@@ -212,6 +212,26 @@ struct CoreKernels {
     id<MTLFunction> siluFwdScalarHalf = nil;
     id<MTLComputePipelineState> siluFwdScalarHalfPSO = nil;
     
+    // Activation Kernels (bfloat16)
+    id<MTLFunction> geluFwdBfloat = nil;
+    id<MTLComputePipelineState> geluFwdBfloatPSO = nil;
+    id<MTLFunction> geluFwdBfloatScalar = nil;
+    id<MTLComputePipelineState> geluFwdBfloatScalarPSO = nil;
+    id<MTLFunction> siluFwdBfloat = nil;
+    id<MTLComputePipelineState> siluFwdBfloatPSO = nil;
+    id<MTLFunction> siluFwdBfloatScalar = nil;
+    id<MTLComputePipelineState> siluFwdBfloatScalarPSO = nil;
+    id<MTLFunction> geluBwdBfloat = nil;
+    id<MTLComputePipelineState> geluBwdBfloatPSO = nil;
+    id<MTLFunction> geluBwdBfloatScalar = nil;
+    id<MTLComputePipelineState> geluBwdBfloatScalarPSO = nil;
+    id<MTLFunction> siluBwdBfloat = nil;
+    id<MTLComputePipelineState> siluBwdBfloatPSO = nil;
+    id<MTLFunction> siluBwdBfloatScalar = nil;
+    id<MTLComputePipelineState> siluBwdBfloatScalarPSO = nil;
+    id<MTLFunction> rmsnormFwdBfloat = nil;
+    id<MTLComputePipelineState> rmsnormFwdBfloatPSO = nil;
+    
     // SDPA
     id<MTLFunction> attentionNaive = nil;
     id<MTLComputePipelineState> attentionNaivePSO = nil;
@@ -219,18 +239,28 @@ struct CoreKernels {
     id<MTLComputePipelineState> flashAttentionFwdV2PSO = nil;
     id<MTLFunction> flashAttentionBwdV2 = nil;
     id<MTLComputePipelineState> flashAttentionBwdV2PSO = nil;
+    id<MTLFunction> sdpaVector64 = nil;
+    id<MTLComputePipelineState> sdpaVector64PSO = nil;
     
     // Fused Softmax
     id<MTLFunction> fusedSoftmax = nil;
     id<MTLComputePipelineState> fusedSoftmaxPSO = nil;
     id<MTLFunction> fusedSoftmaxVec4 = nil;
     id<MTLComputePipelineState> fusedSoftmaxVec4PSO = nil;
+    id<MTLFunction> fusedSoftmaxHalf = nil;
+    id<MTLComputePipelineState> fusedSoftmaxHalfPSO = nil;
+    id<MTLFunction> fusedSoftmaxBfloat = nil;
+    id<MTLComputePipelineState> fusedSoftmaxBfloatPSO = nil;
     
     // LayerNorm
     id<MTLFunction> layernormFwd = nil;
     id<MTLComputePipelineState> layernormFwdPSO = nil;
     id<MTLFunction> fusedAddLayernorm = nil;
     id<MTLComputePipelineState> fusedAddLayernormPSO = nil;
+    id<MTLFunction> layernormFwdHalf = nil;
+    id<MTLComputePipelineState> layernormFwdHalfPSO = nil;
+    id<MTLFunction> layernormFwdBfloat = nil;
+    id<MTLComputePipelineState> layernormFwdBfloatPSO = nil;
     
     // Embedding Bag
     id<MTLFunction> embeddingBagSimple = nil;
@@ -612,6 +642,30 @@ void load_core_kernels() {
         if (kernels.geluFwdScalarHalf) kernels.geluFwdScalarHalfPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdScalarHalf error:&error];
         if (kernels.siluFwdScalarHalf) kernels.siluFwdScalarHalfPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdScalarHalf error:&error];
         
+        // Activation kernels (bfloat16)
+        kernels.geluFwdBfloat = [coreLib newFunctionWithName:@"gelu_fwd_bfloat"];
+        kernels.geluFwdBfloatScalar = [coreLib newFunctionWithName:@"gelu_fwd_bfloat_scalar"];
+        kernels.siluFwdBfloat = [coreLib newFunctionWithName:@"silu_fwd_bfloat"];
+        kernels.siluFwdBfloatScalar = [coreLib newFunctionWithName:@"silu_fwd_bfloat_scalar"];
+        
+        if (kernels.geluFwdBfloat) kernels.geluFwdBfloatPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdBfloat error:&error];
+        if (kernels.geluFwdBfloatScalar) kernels.geluFwdBfloatScalarPSO = [device newComputePipelineStateWithFunction:kernels.geluFwdBfloatScalar error:&error];
+        if (kernels.siluFwdBfloat) kernels.siluFwdBfloatPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdBfloat error:&error];
+        if (kernels.siluFwdBfloatScalar) kernels.siluFwdBfloatScalarPSO = [device newComputePipelineStateWithFunction:kernels.siluFwdBfloatScalar error:&error];
+        
+        // Activation kernels (bfloat16 backward)
+        kernels.geluBwdBfloat = [coreLib newFunctionWithName:@"gelu_bwd_bfloat"];
+        kernels.geluBwdBfloatScalar = [coreLib newFunctionWithName:@"gelu_bwd_bfloat_scalar"];
+        kernels.siluBwdBfloat = [coreLib newFunctionWithName:@"silu_bwd_bfloat"];
+        kernels.siluBwdBfloatScalar = [coreLib newFunctionWithName:@"silu_bwd_bfloat_scalar"];
+        kernels.rmsnormFwdBfloat = [coreLib newFunctionWithName:@"rmsnorm_fwd_bfloat"];
+        
+        if (kernels.geluBwdBfloat) kernels.geluBwdBfloatPSO = [device newComputePipelineStateWithFunction:kernels.geluBwdBfloat error:&error];
+        if (kernels.geluBwdBfloatScalar) kernels.geluBwdBfloatScalarPSO = [device newComputePipelineStateWithFunction:kernels.geluBwdBfloatScalar error:&error];
+        if (kernels.siluBwdBfloat) kernels.siluBwdBfloatPSO = [device newComputePipelineStateWithFunction:kernels.siluBwdBfloat error:&error];
+        if (kernels.siluBwdBfloatScalar) kernels.siluBwdBfloatScalarPSO = [device newComputePipelineStateWithFunction:kernels.siluBwdBfloatScalar error:&error];
+        if (kernels.rmsnormFwdBfloat) kernels.rmsnormFwdBfloatPSO = [device newComputePipelineStateWithFunction:kernels.rmsnormFwdBfloat error:&error];
+        
         // SDPA
         kernels.attentionNaive = [coreLib newFunctionWithName:@"attention_naive"];
         if (kernels.attentionNaive) kernels.attentionNaivePSO = [device newComputePipelineStateWithFunction:kernels.attentionNaive error:&error];
@@ -622,17 +676,28 @@ void load_core_kernels() {
         kernels.flashAttentionBwdV2 = [coreLib newFunctionWithName:@"flash_attention_bwd_v2"];
         if (kernels.flashAttentionBwdV2) kernels.flashAttentionBwdV2PSO = [device newComputePipelineStateWithFunction:kernels.flashAttentionBwdV2 error:&error];
         
+        kernels.sdpaVector64 = [coreLib newFunctionWithName:@"sdpa_vector_64"];
+        if (kernels.sdpaVector64) kernels.sdpaVector64PSO = [device newComputePipelineStateWithFunction:kernels.sdpaVector64 error:&error];
+        
         // Fused Softmax
         kernels.fusedSoftmax = [coreLib newFunctionWithName:@"fused_softmax"];
         if (kernels.fusedSoftmax) kernels.fusedSoftmaxPSO = [device newComputePipelineStateWithFunction:kernels.fusedSoftmax error:&error];
         kernels.fusedSoftmaxVec4 = [coreLib newFunctionWithName:@"fused_softmax_vec4"];
         if (kernels.fusedSoftmaxVec4) kernels.fusedSoftmaxVec4PSO = [device newComputePipelineStateWithFunction:kernels.fusedSoftmaxVec4 error:&error];
+        kernels.fusedSoftmaxHalf = [coreLib newFunctionWithName:@"fused_softmax_half"];
+        if (kernels.fusedSoftmaxHalf) kernels.fusedSoftmaxHalfPSO = [device newComputePipelineStateWithFunction:kernels.fusedSoftmaxHalf error:&error];
+        kernels.fusedSoftmaxBfloat = [coreLib newFunctionWithName:@"fused_softmax_bfloat"];
+        if (kernels.fusedSoftmaxBfloat) kernels.fusedSoftmaxBfloatPSO = [device newComputePipelineStateWithFunction:kernels.fusedSoftmaxBfloat error:&error];
         
         // LayerNorm
         kernels.layernormFwd = [coreLib newFunctionWithName:@"layernorm_fwd"];
         if (kernels.layernormFwd) kernels.layernormFwdPSO = [device newComputePipelineStateWithFunction:kernels.layernormFwd error:&error];
         kernels.fusedAddLayernorm = [coreLib newFunctionWithName:@"fused_add_layernorm"];
         if (kernels.fusedAddLayernorm) kernels.fusedAddLayernormPSO = [device newComputePipelineStateWithFunction:kernels.fusedAddLayernorm error:&error];
+        kernels.layernormFwdHalf = [coreLib newFunctionWithName:@"layernorm_fwd_half"];
+        if (kernels.layernormFwdHalf) kernels.layernormFwdHalfPSO = [device newComputePipelineStateWithFunction:kernels.layernormFwdHalf error:&error];
+        kernels.layernormFwdBfloat = [coreLib newFunctionWithName:@"layernorm_fwd_bfloat"];
+        if (kernels.layernormFwdBfloat) kernels.layernormFwdBfloatPSO = [device newComputePipelineStateWithFunction:kernels.layernormFwdBfloat error:&error];
         
         // Embedding Bag
         kernels.embeddingBagSimple = [coreLib newFunctionWithName:@"embedding_bag_simple"];
@@ -2310,30 +2375,44 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS");
     TORCH_CHECK(W.device().type() == at::kMPS, "W must be on MPS");
     
-    // Handle bf16 by promoting to fp32
     bool is_bf16 = X.scalar_type() == at::kBFloat16;
-    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
-    torch::Tensor W_compute = is_bf16 ? W.to(at::kFloat) : W;
-    bool is_half = X_compute.scalar_type() == at::kHalf;
+    bool is_half = X.scalar_type() == at::kHalf;
     
-    int64_t B = X_compute.size(0);
-    int64_t N = X_compute.size(1);
-    int64_t elem_size = is_half ? 2 : 4;
+    int64_t B = X.size(0);
+    int64_t N = X.size(1);
+    int64_t elem_size = (is_half || is_bf16) ? 2 : 4;
     
-    auto Y = torch::empty_like(X_compute);
+    auto Y = torch::empty_like(X);
     // Rstd always in float for numerical stability
-    auto Rstd = torch::empty({B}, X_compute.options().dtype(at::kFloat));
+    auto Rstd = torch::empty({B}, X.options().dtype(at::kFloat));
     
     // Select kernel based on dtype
-    id<MTLComputePipelineState> pso = is_half ? kernels.rmsnormFwdHalfPSO : kernels.rmsnormFwdPSO;
-    id<MTLComputePipelineState> pso_vec4 = is_half ? nil : kernels.rmsnormFwdVec4PSO; // No vec4 half kernel yet
+    id<MTLComputePipelineState> pso = nil;
+    id<MTLComputePipelineState> pso_vec4 = nil;
+    
+    if (is_bf16 && kernels.rmsnormFwdBfloatPSO) {
+        pso = kernels.rmsnormFwdBfloatPSO;
+    } else if (is_half) {
+        pso = kernels.rmsnormFwdHalfPSO;
+    } else {
+        pso = kernels.rmsnormFwdPSO;
+        pso_vec4 = kernels.rmsnormFwdVec4PSO;
+    }
+    
+    // Fallback for bf16 if no kernel available
+    if (is_bf16 && !pso) {
+        auto X_fp32 = X.to(at::kFloat);
+        auto W_fp32 = W.to(at::kFloat);
+        auto [Y_fp32, Rstd_out] = rmsnorm_fwd_metal(X_fp32, W_fp32, eps);
+        return std::make_tuple(Y_fp32.to(at::kBFloat16), Rstd_out);
+    }
     
     // Check for vectorization (float only for now)
-    bool use_vec4 = pso_vec4 && !is_half &&
+    bool use_vec4 = pso_vec4 && !is_half && !is_bf16 &&
                     (N % 4 == 0) && 
-                    X_compute.is_contiguous() && W_compute.is_contiguous() && 
-                    (X_compute.storage_offset() % 4 == 0) && 
-                    (W_compute.storage_offset() % 4 == 0);
+                    X.is_contiguous() && W.is_contiguous() && 
+                    (X.storage_offset() % 4 == 0) && 
+                    (W.storage_offset() % 4 == 0);
 
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
@@ -2342,8 +2421,8 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
         if (use_vec4) {
              [encoder setComputePipelineState:pso_vec4];
              NSUInteger threads = std::min((NSUInteger)(N / 4), (NSUInteger)256);
-             [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
-             [encoder setBuffer:getMTLBufferStorage(W_compute) offset:W_compute.storage_offset() * elem_size atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * elem_size atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * elem_size atIndex:1];
              [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:2];
              [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3]; // Rstd always float
              uint32_t N_u = (uint32_t)N;
@@ -2352,8 +2431,8 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
              [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
         } else if (pso) {
              [encoder setComputePipelineState:pso];
-             [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
-             [encoder setBuffer:getMTLBufferStorage(W_compute) offset:W_compute.storage_offset() * elem_size atIndex:1];
+             [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * elem_size atIndex:0];
+             [encoder setBuffer:getMTLBufferStorage(W) offset:W.storage_offset() * elem_size atIndex:1];
              [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:2];
              [encoder setBuffer:getMTLBufferStorage(Rstd) offset:Rstd.storage_offset() * 4 atIndex:3]; // Rstd always float
              uint32_t N_u = (uint32_t)N;
@@ -2367,12 +2446,9 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    // Convert back if bf16
-    if (is_bf16) {
-        return std::make_tuple(Y.to(at::kBFloat16), Rstd);
-    }
     return std::make_tuple(Y, Rstd);
 }
+
 
 std::tuple<torch::Tensor, torch::Tensor> rmsnorm_bwd_metal(torch::Tensor dY, torch::Tensor X, torch::Tensor Rstd, torch::Tensor W) {
     load_core_kernels();
@@ -2805,23 +2881,35 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
     
-    // Handle bf16 by promoting to fp32 (Metal doesn't support native bfloat16)
     bool is_bf16 = X.scalar_type() == at::kBFloat16;
-    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
-    bool is_half = X_compute.scalar_type() == at::kHalf;
+    bool is_half = X.scalar_type() == at::kHalf;
     
-    auto Y = torch::empty_like(X_compute);
-    int64_t numel = X_compute.numel();
-    int64_t elem_size = is_half ? 2 : 4;  // bytes per element
+    auto Y = torch::empty_like(X);
+    int64_t numel = X.numel();
+    int64_t elem_size = (is_half || is_bf16) ? 2 : 4;  // bytes per element
     
     // Select appropriate kernel PSO based on dtype
-    id<MTLComputePipelineState> vecPSO = is_half ? kernels.geluFwdHalfPSO : kernels.geluFwdPSO;
-    id<MTLComputePipelineState> scalarPSO = is_half ? kernels.geluFwdScalarHalfPSO : kernels.geluFwdScalarPSO;
+    id<MTLComputePipelineState> vecPSO = nil;
+    id<MTLComputePipelineState> scalarPSO = nil;
     
+    if (is_bf16 && kernels.geluFwdBfloatPSO) {
+        vecPSO = kernels.geluFwdBfloatPSO;
+        scalarPSO = kernels.geluFwdBfloatScalarPSO;
+    } else if (is_half) {
+        vecPSO = kernels.geluFwdHalfPSO;
+        scalarPSO = kernels.geluFwdScalarHalfPSO;
+    } else {
+        vecPSO = kernels.geluFwdPSO;
+        scalarPSO = kernels.geluFwdScalarPSO;
+    }
+    
+    // Fallback to PyTorch if no kernel available
     if (!vecPSO) {
-        // CPU fallback
-        auto result = torch::gelu(X_compute);
-        return is_bf16 ? result.to(at::kBFloat16) : result;
+        if (is_bf16) {
+            auto x_fp32 = X.to(at::kFloat);
+            return torch::gelu(x_fp32).to(at::kBFloat16);
+        }
+        return torch::gelu(X);
     }
     
     int64_t numel_vec = numel / 4;
@@ -2833,7 +2921,7 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
         
         if (numel_vec > 0) {
             [encoder setComputePipelineState:vecPSO];
-            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * elem_size atIndex:0];
             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:1];
             uint32_t numel_u = (uint32_t)numel;
             [encoder setBytes:&numel_u length:4 atIndex:2];
@@ -2847,7 +2935,7 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
         if (tail > 0 && scalarPSO) {
             [encoder setComputePipelineState:scalarPSO];
             int64_t offset = numel_vec * 4 * elem_size; // bytes
-            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:(X_compute.storage_offset() * elem_size + offset) atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(X) offset:(X.storage_offset() * elem_size + offset) atIndex:0];
             [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * elem_size + offset) atIndex:1];
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         }
@@ -2856,8 +2944,9 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return is_bf16 ? Y.to(at::kBFloat16) : Y;
+    return Y;
 }
+
 
 torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     load_core_kernels();
@@ -2865,25 +2954,38 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     TORCH_CHECK(dY.device().type() == at::kMPS, "dY must be on MPS device");
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     
-    // Handle bf16 by promoting to fp32
     bool is_bf16 = X.scalar_type() == at::kBFloat16;
-    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
-    torch::Tensor dY_compute = is_bf16 ? dY.to(at::kFloat) : dY;
-    bool is_half = X_compute.scalar_type() == at::kHalf;
+    bool is_half = X.scalar_type() == at::kHalf;
     
-    auto dX = torch::empty_like(X_compute);
-    int64_t numel = X_compute.numel();
-    int64_t elem_size = is_half ? 2 : 4;
+    auto dX = torch::empty_like(X);
+    int64_t numel = X.numel();
+    int64_t elem_size = (is_half || is_bf16) ? 2 : 4;
     
-    id<MTLComputePipelineState> pso = is_half ? kernels.geluBwdHalfPSO : kernels.geluBwdPSO;
+    // Select appropriate kernel PSO based on dtype
+    id<MTLComputePipelineState> pso = nil;
     
+    if (is_bf16 && kernels.geluBwdBfloatPSO) {
+        pso = kernels.geluBwdBfloatPSO;
+    } else if (is_half) {
+        pso = kernels.geluBwdHalfPSO;
+    } else {
+        pso = kernels.geluBwdPSO;
+    }
+    
+    // Fallback to PyTorch
     if (!pso) {
-        // CPU fallback via autograd
-        auto X_cpu = X_compute.cpu().requires_grad_(true);
+        if (is_bf16) {
+            auto X_fp32 = X.to(at::kFloat);
+            auto dY_fp32 = dY.to(at::kFloat);
+            auto X_cpu = X_fp32.cpu().requires_grad_(true);
+            auto Y_cpu = torch::gelu(X_cpu);
+            Y_cpu.backward(dY_fp32.cpu());
+            return X_cpu.grad().to(X.device()).to(at::kBFloat16);
+        }
+        auto X_cpu = X.cpu().requires_grad_(true);
         auto Y_cpu = torch::gelu(X_cpu);
-        Y_cpu.backward(dY_compute.cpu());
-        auto result = X_cpu.grad().to(X.device());
-        return is_bf16 ? result.to(at::kBFloat16) : result;
+        Y_cpu.backward(dY.cpu());
+        return X_cpu.grad().to(X.device());
     }
     
     int64_t numel_vec = numel / 4;
@@ -2894,8 +2996,8 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
         [encoder setComputePipelineState:pso];
-        [encoder setBuffer:getMTLBufferStorage(dY_compute) offset:dY_compute.storage_offset() * elem_size atIndex:0];
-        [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * elem_size atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * elem_size atIndex:1];
         [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * elem_size atIndex:2];
         uint32_t numel_u = (uint32_t)numel;
         [encoder setBytes:&numel_u length:4 atIndex:3];
@@ -2909,8 +3011,9 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return is_bf16 ? dX.to(at::kBFloat16) : dX;
+    return dX;
 }
+
 
 torch::Tensor silu_fwd_metal(torch::Tensor X) {
     load_core_kernels();
@@ -2918,21 +3021,35 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     TORCH_CHECK(X.is_contiguous(), "X must be contiguous");
     
-    // Handle bf16 by promoting to fp32
     bool is_bf16 = X.scalar_type() == at::kBFloat16;
-    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
-    bool is_half = X_compute.scalar_type() == at::kHalf;
+    bool is_half = X.scalar_type() == at::kHalf;
     
-    auto Y = torch::empty_like(X_compute);
-    int64_t numel = X_compute.numel();
-    int64_t elem_size = is_half ? 2 : 4;
+    auto Y = torch::empty_like(X);
+    int64_t numel = X.numel();
+    int64_t elem_size = (is_half || is_bf16) ? 2 : 4;
     
-    id<MTLComputePipelineState> vecPSO = is_half ? kernels.siluFwdHalfPSO : kernels.siluFwdPSO;
-    id<MTLComputePipelineState> scalarPSO = is_half ? kernels.siluFwdScalarHalfPSO : kernels.siluFwdScalarPSO;
+    // Select appropriate kernel PSO based on dtype
+    id<MTLComputePipelineState> vecPSO = nil;
+    id<MTLComputePipelineState> scalarPSO = nil;
     
+    if (is_bf16 && kernels.siluFwdBfloatPSO) {
+        vecPSO = kernels.siluFwdBfloatPSO;
+        scalarPSO = kernels.siluFwdBfloatScalarPSO;
+    } else if (is_half) {
+        vecPSO = kernels.siluFwdHalfPSO;
+        scalarPSO = kernels.siluFwdScalarHalfPSO;
+    } else {
+        vecPSO = kernels.siluFwdPSO;
+        scalarPSO = kernels.siluFwdScalarPSO;
+    }
+    
+    // Fallback to PyTorch if no kernel available
     if (!vecPSO) {
-        auto result = torch::silu(X_compute);
-        return is_bf16 ? result.to(at::kBFloat16) : result;
+        if (is_bf16) {
+            auto x_fp32 = X.to(at::kFloat);
+            return torch::silu(x_fp32).to(at::kBFloat16);
+        }
+        return torch::silu(X);
     }
     
     int64_t numel_vec = numel / 4;
@@ -2944,7 +3061,7 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
         
         if (numel_vec > 0) {
             [encoder setComputePipelineState:vecPSO];
-            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * elem_size atIndex:0];
             [encoder setBuffer:getMTLBufferStorage(Y) offset:Y.storage_offset() * elem_size atIndex:1];
             uint32_t numel_u = (uint32_t)numel;
             [encoder setBytes:&numel_u length:4 atIndex:2];
@@ -2958,7 +3075,7 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
         if (tail > 0 && scalarPSO) {
             [encoder setComputePipelineState:scalarPSO];
             int64_t offset = numel_vec * 4 * elem_size;
-            [encoder setBuffer:getMTLBufferStorage(X_compute) offset:(X_compute.storage_offset() * elem_size + offset) atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(X) offset:(X.storage_offset() * elem_size + offset) atIndex:0];
             [encoder setBuffer:getMTLBufferStorage(Y) offset:(Y.storage_offset() * elem_size + offset) atIndex:1];
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         }
@@ -2967,8 +3084,9 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return is_bf16 ? Y.to(at::kBFloat16) : Y;
+    return Y;
 }
+
 
 torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     load_core_kernels();
@@ -2976,24 +3094,38 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     TORCH_CHECK(dY.device().type() == at::kMPS, "dY must be on MPS device");
     TORCH_CHECK(X.device().type() == at::kMPS, "X must be on MPS device");
     
-    // Handle bf16 by promoting to fp32
     bool is_bf16 = X.scalar_type() == at::kBFloat16;
-    torch::Tensor X_compute = is_bf16 ? X.to(at::kFloat) : X;
-    torch::Tensor dY_compute = is_bf16 ? dY.to(at::kFloat) : dY;
-    bool is_half = X_compute.scalar_type() == at::kHalf;
+    bool is_half = X.scalar_type() == at::kHalf;
     
-    auto dX = torch::empty_like(X_compute);
-    int64_t numel = X_compute.numel();
-    int64_t elem_size = is_half ? 2 : 4;
+    auto dX = torch::empty_like(X);
+    int64_t numel = X.numel();
+    int64_t elem_size = (is_half || is_bf16) ? 2 : 4;
     
-    id<MTLComputePipelineState> pso = is_half ? kernels.siluBwdHalfPSO : kernels.siluBwdPSO;
+    // Select appropriate kernel PSO based on dtype
+    id<MTLComputePipelineState> pso = nil;
     
+    if (is_bf16 && kernels.siluBwdBfloatPSO) {
+        pso = kernels.siluBwdBfloatPSO;
+    } else if (is_half) {
+        pso = kernels.siluBwdHalfPSO;
+    } else {
+        pso = kernels.siluBwdPSO;
+    }
+    
+    // Fallback to PyTorch
     if (!pso) {
-        auto X_cpu = X_compute.cpu().requires_grad_(true);
+        if (is_bf16) {
+            auto X_fp32 = X.to(at::kFloat);
+            auto dY_fp32 = dY.to(at::kFloat);
+            auto X_cpu = X_fp32.cpu().requires_grad_(true);
+            auto Y_cpu = torch::silu(X_cpu);
+            Y_cpu.backward(dY_fp32.cpu());
+            return X_cpu.grad().to(X.device()).to(at::kBFloat16);
+        }
+        auto X_cpu = X.cpu().requires_grad_(true);
         auto Y_cpu = torch::silu(X_cpu);
-        Y_cpu.backward(dY_compute.cpu());
-        auto result = X_cpu.grad().to(X.device());
-        return is_bf16 ? result.to(at::kBFloat16) : result;
+        Y_cpu.backward(dY.cpu());
+        return X_cpu.grad().to(X.device());
     }
     
     int64_t numel_vec = numel / 4;
@@ -3004,8 +3136,8 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         auto encoder = [stream->commandBuffer() computeCommandEncoder];
         
         [encoder setComputePipelineState:pso];
-        [encoder setBuffer:getMTLBufferStorage(dY_compute) offset:dY_compute.storage_offset() * elem_size atIndex:0];
-        [encoder setBuffer:getMTLBufferStorage(X_compute) offset:X_compute.storage_offset() * elem_size atIndex:1];
+        [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * elem_size atIndex:0];
+        [encoder setBuffer:getMTLBufferStorage(X) offset:X.storage_offset() * elem_size atIndex:1];
         [encoder setBuffer:getMTLBufferStorage(dX) offset:dX.storage_offset() * elem_size atIndex:2];
         uint32_t numel_u = (uint32_t)numel;
         [encoder setBytes:&numel_u length:4 atIndex:3];
@@ -3019,8 +3151,9 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
-    return is_bf16 ? dX.to(at::kBFloat16) : dX;
+    return dX;
 }
+
 
 // -----------------------------------------------------------------------------
 // Scaled Dot Product Attention
@@ -3043,11 +3176,13 @@ torch::Tensor sdpa_fwd_metal(torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
     auto L = torch::empty({batch_heads, seq_len}, Q.options());  // logsumexp for backward
     
     // Determine which kernel to use
+    // Use specialized vector kernel for head_dim=64 (fastest path)
+    bool use_vector64 = kernels.sdpaVector64PSO && (head_dim == 64) && !is_causal;
     // Use Flash Attention v2 for larger sequences, naive for small ones
-    bool use_flash = kernels.flashAttentionFwdV2PSO && (seq_len > 256 || is_causal);
-    bool use_naive = kernels.attentionNaivePSO && seq_len <= 1024 && !is_causal;
+    bool use_flash = kernels.flashAttentionFwdV2PSO && (seq_len > 256 || is_causal) && !use_vector64;
+    bool use_naive = kernels.attentionNaivePSO && seq_len <= 1024 && !is_causal && !use_vector64;
     
-    if (!use_flash && !use_naive) {
+    if (!use_flash && !use_naive && !use_vector64) {
         // CPU fallback
         return torch::scaled_dot_product_attention(Q, K, V);
     }
@@ -3092,6 +3227,31 @@ torch::Tensor sdpa_fwd_metal(torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
             NSUInteger threads_per_group = std::min((NSUInteger)seq_len, (NSUInteger)BLOCK_M);
             [encoder dispatchThreadgroups:MTLSizeMake(num_q_blocks, batch_heads, 1) 
                     threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+        } else if (use_vector64) {
+            // Specialized vector kernel for head_dim=64
+            [encoder setComputePipelineState:kernels.sdpaVector64PSO];
+            [encoder setBuffer:getMTLBufferStorage(Q) offset:Q.storage_offset() * 4 atIndex:0];
+            [encoder setBuffer:getMTLBufferStorage(K) offset:K.storage_offset() * 4 atIndex:1];
+            [encoder setBuffer:getMTLBufferStorage(V) offset:V.storage_offset() * 4 atIndex:2];
+            [encoder setBuffer:getMTLBufferStorage(O) offset:O.storage_offset() * 4 atIndex:3];
+            
+            // GQA factor = 1 (no grouped query attention for now)
+            uint32_t gqa_factor = 1;
+            uint32_t kv_seq_len = (uint32_t)seq_len;
+            uint32_t q_stride = (uint32_t)(seq_len * head_dim);  // Stride between heads
+            uint32_t k_stride = (uint32_t)(seq_len * head_dim);
+            uint32_t v_stride = (uint32_t)(seq_len * head_dim);
+            
+            [encoder setBytes:&gqa_factor length:4 atIndex:4];
+            [encoder setBytes:&kv_seq_len length:4 atIndex:5];
+            [encoder setBytes:&q_stride length:4 atIndex:6];
+            [encoder setBytes:&k_stride length:4 atIndex:7];
+            [encoder setBytes:&v_stride length:4 atIndex:8];
+            [encoder setBytes:&scale length:4 atIndex:9];
+            
+            // Grid: (batch*heads, q_seq_len, 1), 64 threads per group (one per head_dim dimension)
+            [encoder dispatchThreadgroups:MTLSizeMake(batch_heads, seq_len, 1) 
+                    threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         } else {
             // Naive attention for small sequences (no causal support)
             [encoder setComputePipelineState:kernels.attentionNaivePSO];
@@ -3309,14 +3469,33 @@ torch::Tensor fused_softmax_metal(torch::Tensor input, int64_t dim_) {
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < ndim; i++) inner_size *= x.size(i);
     
-    // Use vectorized kernel if possible
-    bool use_vec4 = (dim_size % 4 == 0) && (inner_size == 1) && kernels.fusedSoftmaxVec4PSO;
-    id<MTLComputePipelineState> pso = use_vec4 ? kernels.fusedSoftmaxVec4PSO : kernels.fusedSoftmaxPSO;
+    // Select kernel based on dtype
+    bool is_half = (x.scalar_type() == at::kHalf);
+    bool is_bfloat = (x.scalar_type() == at::kBFloat16);
+    
+    id<MTLComputePipelineState> pso = nil;
+    if (is_half && kernels.fusedSoftmaxHalfPSO && inner_size == 1) {
+        // Use optimized half kernel
+        pso = kernels.fusedSoftmaxHalfPSO;
+    } else if (is_bfloat && kernels.fusedSoftmaxBfloatPSO && inner_size == 1) {
+        // Use native bf16 kernel with direct bit truncation
+        pso = kernels.fusedSoftmaxBfloatPSO;
+    } else if (!is_half && !is_bfloat) {
+        // Float32: use vec4 if possible
+        bool use_vec4 = (dim_size % 4 == 0) && (inner_size == 1) && kernels.fusedSoftmaxVec4PSO;
+        pso = use_vec4 ? kernels.fusedSoftmaxVec4PSO : kernels.fusedSoftmaxPSO;
+    }
     
     if (!pso) {
-        // Fallback to PyTorch
+        // Fallback to PyTorch (for unsupported configs)
+        if (is_bfloat) {
+            auto x_fp32 = x.to(torch::kFloat32);
+            auto out_fp32 = torch::softmax(x_fp32, dim);
+            return out_fp32.to(torch::kBFloat16);
+        }
         return torch::softmax(input, dim_);
     }
+
     
     @autoreleasepool {
         id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
@@ -3332,7 +3511,7 @@ torch::Tensor fused_softmax_metal(torch::Tensor input, int64_t dim_) {
         
         [encoder setBytes:&dim_u length:sizeof(uint32_t) atIndex:2];
         [encoder setBytes:&outer_u length:sizeof(uint32_t) atIndex:3];
-        if (!use_vec4) {
+        if (!is_half || inner_size != 1) {
             [encoder setBytes:&inner_u length:sizeof(uint32_t) atIndex:4];
         }
         
@@ -3373,8 +3552,32 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> layernorm_fwd_metal(
     auto w = weight.contiguous();
     auto b = bias.contiguous();
     
-    if (!kernels.layernormFwdPSO) {
-        // Fallback
+    // Select kernel based on dtype
+    bool is_half = (x.scalar_type() == at::kHalf);
+    bool is_bfloat = (x.scalar_type() == at::kBFloat16);
+    
+    id<MTLComputePipelineState> pso = nil;
+    if (is_half && kernels.layernormFwdHalfPSO) {
+        pso = kernels.layernormFwdHalfPSO;
+    } else if (is_bfloat && kernels.layernormFwdBfloatPSO) {
+        // Use native bf16 kernel with direct bit truncation
+        pso = kernels.layernormFwdBfloatPSO;
+    } else if (!is_half && !is_bfloat && kernels.layernormFwdPSO) {
+        pso = kernels.layernormFwdPSO;
+    }
+    
+    if (!pso) {
+        // Fallback to PyTorch
+        if (is_bfloat) {
+            // bf16: compute in float32 then convert back
+            auto x_fp32 = x.to(torch::kFloat32);
+            auto w_fp32 = w.to(torch::kFloat32);
+            auto b_fp32 = b.to(torch::kFloat32);
+            auto result = torch::layer_norm(x_fp32, {N}, w_fp32, b_fp32, eps);
+            auto m = x_fp32.view({B, N}).mean(-1);
+            auto v = x_fp32.view({B, N}).var(-1, false);
+            return std::make_tuple(result.to(torch::kBFloat16), m, torch::rsqrt(v + eps));
+        }
         auto result = torch::layer_norm(input, {N}, weight, bias, eps);
         auto m = x.view({B, N}).mean(-1);
         auto v = x.view({B, N}).var(-1, false);
@@ -3385,7 +3588,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> layernorm_fwd_metal(
         id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
         id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
         
-        [encoder setComputePipelineState:kernels.layernormFwdPSO];
+        [encoder setComputePipelineState:pso];
         [encoder setBuffer:getMTLBufferStorage(x) offset:x.storage_offset() * x.element_size() atIndex:0];
         [encoder setBuffer:getMTLBufferStorage(w) offset:w.storage_offset() * w.element_size() atIndex:1];
         [encoder setBuffer:getMTLBufferStorage(b) offset:b.storage_offset() * b.element_size() atIndex:2];

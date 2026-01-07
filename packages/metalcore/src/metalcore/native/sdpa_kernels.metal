@@ -27,31 +27,16 @@ constant uint BLOCK_D = 128;   // Max head dimension (supports up to 128)
 constant uint WARP_SIZE = 32;  // SIMD width on Apple Silicon
 
 // =============================================================================
-// Vectorized Load/Store Helpers
+// Vectorized Load/Store Macros (guaranteed zero overhead)
 // =============================================================================
-
-inline float4 load_float4(device const float* ptr, uint idx) {
-    return reinterpret_cast<device const float4*>(ptr)[idx];
-}
-
-inline void store_float4(device float* ptr, uint idx, float4 val) {
-    reinterpret_cast<device float4*>(ptr)[idx] = val;
-}
+#define LOAD_FLOAT4(ptr, idx) (reinterpret_cast<device const float4*>(ptr)[idx])
+#define STORE_FLOAT4(ptr, idx, val) (reinterpret_cast<device float4*>(ptr)[idx] = (val))
 
 // =============================================================================
-// SIMD-accelerated Softmax Helpers
+// SIMD-accelerated Softmax Macros
 // =============================================================================
-
-// Compute row-wise max across all threads in simdgroup
-inline float simd_row_max(float val) {
-    // Apple Silicon supports simd_max for fast warp-level reduction
-    return simd_max(val);
-}
-
-// Compute row-wise sum across all threads in simdgroup
-inline float simd_row_sum(float val) {
-    return simd_sum(val);
-}
+#define SIMD_ROW_MAX(val) simd_max(val)
+#define SIMD_ROW_SUM(val) simd_sum(val)
 
 // =============================================================================
 // Flash Attention Forward - Optimized Kernel
@@ -110,7 +95,7 @@ kernel void flash_attention_fwd_v2(
     float q_reg[BLOCK_D / 4][4];  // Register blocking with float4
     uint num_vec = head_dim / 4;
     for (uint v = 0; v < num_vec && v < BLOCK_D / 4; ++v) {
-        float4 qv = load_float4(Q, (base + global_q * head_dim) / 4 + v);
+        float4 qv = LOAD_FLOAT4(Q, (base + global_q * head_dim) / 4 + v);
         q_reg[v][0] = qv.x;
         q_reg[v][1] = qv.y;
         q_reg[v][2] = qv.z;
@@ -146,13 +131,13 @@ kernel void flash_attention_fwd_v2(
             uint global_k = k_start + tid;
             // Vectorized load
             for (uint v = 0; v < num_vec && v < BLOCK_D / 4; ++v) {
-                float4 kv = load_float4(K, (base + global_k * head_dim) / 4 + v);
+                float4 kv = LOAD_FLOAT4(K, (base + global_k * head_dim) / 4 + v);
                 K_tile[tid * BLOCK_D + v * 4 + 0] = kv.x;
                 K_tile[tid * BLOCK_D + v * 4 + 1] = kv.y;
                 K_tile[tid * BLOCK_D + v * 4 + 2] = kv.z;
                 K_tile[tid * BLOCK_D + v * 4 + 3] = kv.w;
                 
-                float4 vv = load_float4(V, (base + global_k * head_dim) / 4 + v);
+                float4 vv = LOAD_FLOAT4(V, (base + global_k * head_dim) / 4 + v);
                 V_tile[tid * BLOCK_D + v * 4 + 0] = vv.x;
                 V_tile[tid * BLOCK_D + v * 4 + 1] = vv.y;
                 V_tile[tid * BLOCK_D + v * 4 + 2] = vv.z;
@@ -243,7 +228,7 @@ kernel void flash_attention_fwd_v2(
         out_v.y = o_reg[v * 4 + 1] * inv_l;
         out_v.z = o_reg[v * 4 + 2] * inv_l;
         out_v.w = o_reg[v * 4 + 3] * inv_l;
-        store_float4(O, (base + global_q * head_dim) / 4 + v, out_v);
+        STORE_FLOAT4(O, (base + global_q * head_dim) / 4 + v, out_v);
     }
     
     // Store logsumexp for backward
@@ -383,4 +368,100 @@ kernel void flash_attention_bwd_v2(
                                       dv_val, memory_order_relaxed);
         }
     }
+}
+
+// =============================================================================
+// SDPA Vector Mode - Simple 64-thread implementation
+// =============================================================================
+// Each thread handles one dimension of head_dim=64
+// All threads cooperate to compute attention for one (batch, head, query)
+
+constant uint HEAD_DIM_64 = 64;
+
+kernel void sdpa_vector_64(
+    device const float* Q [[buffer(0)]],       // (B*H, N, 64)
+    device const float* K [[buffer(1)]],       // (B*H, N, 64)
+    device const float* V [[buffer(2)]],       // (B*H, N, 64)
+    device float* O [[buffer(3)]],             // (B*H, N, 64)
+    constant uint& gqa_factor [[buffer(4)]],
+    constant uint& kv_seq_len [[buffer(5)]],
+    constant uint& q_stride [[buffer(6)]],
+    constant uint& k_stride [[buffer(7)]],
+    constant uint& v_stride [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    uint kv_head = batch_head / gqa_factor;
+    
+    // Each thread owns one dimension of head_dim=64
+    uint d = tid;  // tid ∈ [0, 63]
+    if (d >= 64) return;
+    
+    // Pointers
+    device const float* q_ptr = Q + batch_head * q_stride + q_idx * HEAD_DIM_64;
+    device const float* k_base = K + kv_head * k_stride;
+    device const float* v_base = V + kv_head * v_stride;
+    device float* o_ptr = O + batch_head * q_stride + q_idx * HEAD_DIM_64;
+    
+    // Load my query dimension
+    float q_val = q_ptr[d];
+    
+    // Shared memory for dot product reduction and softmax
+    threadgroup float shared_scratch[64];
+    
+    // Online softmax accumulators - one per dimension
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    // Process all keys
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const float* k_ptr = k_base + k_idx * HEAD_DIM_64;
+        device const float* v_ptr = v_base + k_idx * HEAD_DIM_64;
+        
+        // Each thread loads one K dimension, compute partial dot product
+        float k_val = k_ptr[d];
+        float partial = q_val * k_val;
+        
+        // Reduce to get full dot product (sum across 64 threads using 2 simdgroups)
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Tree reduction
+        if (tid < 32) shared_scratch[tid] += shared_scratch[tid + 32];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        float dot;
+        if (tid < 32) {
+            dot = simd_sum(shared_scratch[tid]);
+        }
+        // Broadcast dot to all threads
+        if (tid == 0) shared_scratch[0] = dot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        // Online softmax update (same for all threads since they share same score)
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        // Load V and update output accumulator
+        float v_val = v_ptr[d];
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+    }
+    
+    // Normalize and write output (each thread writes one dimension)
+    o_ptr[d] = o_acc / l_prev;
 }

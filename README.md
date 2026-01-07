@@ -80,6 +80,8 @@ See **[benchmarks.md](benchmarks.md)** for detailed benchmark results.
 - Python 3.9 - 3.14
 - PyTorch 2.0+
 
+> **Note**: While M1 and M2 chips are supported, **M3/M4 chips are recommended** for best performance. Some BFloat16 kernels require Metal 3.1+ (macOS 14+). The library gracefully falls back to FP32 computation when native bf16 kernels are unavailable.
+
 ## Development
 
 ```bash

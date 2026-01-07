@@ -37,8 +37,12 @@ from .ops import (
 )
 
 # High-impact ops (direct backend exports)
+_HAS_METAL_KERNELS = False
 try:
     import metalcore_backend as _mc
+    # Check if kernels actually loaded by looking for a required function
+    if hasattr(_mc, 'qr_single'):
+        _HAS_METAL_KERNELS = True
     # lu_batched = _mc.lu_batched
     # syrk_batched = _mc.syrk_batched
     # frobenius_norm_batched = _mc.frobenius_norm_batched
@@ -47,20 +51,24 @@ try:
 except ImportError:
     pass
 
+def has_metal_kernels() -> bool:
+    """Check if Metal kernels are available (for test skipping)."""
+    return _HAS_METAL_KERNELS
+
 # SDPA enable/disable flags
 _sdpa_enabled = False
 _sdpa_original_fn = None
 
-def enable_metal_sdpa():
+def enable_slow_metal_sdpa():
     """
     Enable Metal SDPA by monkeypatching torch.nn.functional.scaled_dot_product_attention.
     
-    Note: Our custom Metal SDPA is slower than PyTorch's native implementation,
-    but provides full autograd support with Metal backward pass.
+    WARNING: Our custom Metal SDPA is ~6x SLOWER than PyTorch's native implementation!
+    This is for non-PyTorch use cases only. Use PyTorch's native SDPA when possible.
     
     Usage:
         import metalcore
-        metalcore.enable_metal_sdpa()
+        metalcore.enable_slow_metal_sdpa()
     """
     global _sdpa_enabled, _sdpa_original_fn
     import torch.nn.functional as F
@@ -71,9 +79,9 @@ def enable_metal_sdpa():
     _sdpa_original_fn = F.scaled_dot_product_attention
     F.scaled_dot_product_attention = metal_scaled_dot_product_attention
     _sdpa_enabled = True
-    print("metalcore: Metal SDPA enabled (monkeypatched)")
+    print("metalcore: Metal SDPA enabled (WARNING: ~6x slower than PyTorch native)")
 
-def disable_metal_sdpa():
+def disable_slow_metal_sdpa():
     """Disable Metal SDPA and restore PyTorch's native implementation."""
     global _sdpa_enabled, _sdpa_original_fn
     import torch.nn.functional as F
@@ -86,11 +94,11 @@ def disable_metal_sdpa():
     _sdpa_original_fn = None
     print("metalcore: Metal SDPA disabled (restored native)")
 
-def is_metal_sdpa_enabled():
-    """Check if Metal SDPA is currently enabled."""
+def is_slow_metal_sdpa_enabled():
+    """Check if (slow) Metal SDPA is currently enabled."""
     return _sdpa_enabled
 
-__version__ = "0.1.9"
+__version__ = "0.1.10"
 __all__ = [
     "trsm",
     "trsm_batched", 
@@ -116,11 +124,11 @@ __all__ = [
     "metal_silu",
     "MetalGELU",
     "MetalSiLU",
-    # Attention (explicit enable required)
+    # Attention (explicit enable required - WARNING: slower than PyTorch native!)
     "metal_scaled_dot_product_attention",
-    "enable_metal_sdpa",
-    "disable_metal_sdpa",
-    "is_metal_sdpa_enabled",
+    "enable_slow_metal_sdpa",
+    "disable_slow_metal_sdpa",
+    "is_slow_metal_sdpa_enabled",
     # ComfyUI patches
     "patch_comfy",
     "unpatch_comfy",

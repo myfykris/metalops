@@ -40,6 +40,10 @@ parser.add_argument("--training", action="store_true", help="Run only training b
 parser.add_argument("--activations", action="store_true", help="Run only activation benchmarks (GELU/SiLU)")
 parser.add_argument("--sdpa", action="store_true", help="Run only SDPA benchmarks")
 parser.add_argument("--pipeline", action="store_true", help="Run only pipeline benchmarks")
+parser.add_argument("--softmax", action="store_true", help="Run only fused softmax benchmarks")
+parser.add_argument("--layernorm", action="store_true", help="Run only LayerNorm benchmarks")
+parser.add_argument("--embedding", action="store_true", help="Run only embedding bag benchmarks")
+parser.add_argument("--scatter", action="store_true", help="Run only scatter/gather benchmarks")
 parser.add_argument("--compare", action="store_true", help="Compare results with previous run")
 args = parser.parse_args()
 
@@ -50,13 +54,14 @@ SKIP_LONG_OPS = args.nolongops  # Skip slow benchmarks (SVD, EIGH, models, pipel
 
 # Dtype configuration
 DTYPE_MAP = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
-if args.dtype == "all":
+# Lite mode always tests all dtypes for comprehensive validation
+if LITE_MODE or args.dtype == "all":
     BENCHMARK_DTYPES = [("fp32", torch.float32), ("fp16", torch.float16), ("bf16", torch.bfloat16)]
 else:
     BENCHMARK_DTYPES = [(args.dtype, DTYPE_MAP[args.dtype])]
 
 # Test selection (if none specified, run all)
-RUN_ALL = not any([args.svd, args.qr, args.eigh, args.cholesky, args.solve, args.models, args.pipeline, args.rmsnorm, args.adamw, args.training, args.activations, args.sdpa])
+RUN_ALL = not any([args.svd, args.qr, args.eigh, args.cholesky, args.solve, args.models, args.pipeline, args.rmsnorm, args.adamw, args.training, args.activations, args.sdpa, args.softmax, args.layernorm, args.embedding, args.scatter])
 # All ops run, but SKIP_LONG_OPS filters large configs within each op
 RUN_SVD = args.svd or RUN_ALL
 RUN_QR = args.qr or RUN_ALL
@@ -67,6 +72,10 @@ RUN_RMSNORM = args.rmsnorm or args.training or RUN_ALL
 RUN_ADAMW = args.adamw or args.training or RUN_ALL
 RUN_ACTIVATIONS = args.activations or RUN_ALL
 RUN_SDPA = args.sdpa or RUN_ALL
+RUN_SOFTMAX = args.softmax or RUN_ALL
+RUN_LAYERNORM = args.layernorm or RUN_ALL
+RUN_EMBEDDING = args.embedding or RUN_ALL
+RUN_SCATTER = args.scatter or RUN_ALL
 RUN_MODELS = args.models or (RUN_ALL and not LITE_MODE and not SKIP_LONG_OPS)  # Skip models entirely in nolongops
 RUN_PIPELINE = args.pipeline or (RUN_ALL and not LITE_MODE and not SKIP_LONG_OPS)  # Skip pipeline entirely in nolongops
 
@@ -1385,6 +1394,383 @@ def benchmark_activations():
     return results
 
 
+def benchmark_softmax():
+    """Benchmark fused softmax operations."""
+    print("Benchmarking Fused Softmax...")
+    results = []
+    
+    try:
+        from metalcore import fused_softmax
+    except ImportError:
+        print("  metalcore.fused_softmax not available, skipping")
+        return results
+
+    # Extended configs for thorough testing
+    configs = [
+        ("Small", 32, 1024),
+        ("Medium", 64, 4096),
+        ("Large", 128, 8192),
+        ("Very Large", 256, 16384),
+        ("Huge", 512, 32768),
+        ("LLM Vocab", 32, 32000),
+        ("LLM Vocab Large", 128, 128000),
+    ]
+    if LITE_MODE:
+        configs = [("Medium", 64, 4096), ("GPU Win", 256, 16384)]
+    elif QUICK_MODE:
+        configs = configs[:4]
+    
+    iters = 1 if LITE_MODE else (50 if QUICK_MODE else 500)
+    warmup = 1 if LITE_MODE else 10
+        
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for name, B, N in configs:
+            config_name = f"Softmax {name} ({B}x{N}) {dtype_name}"
+            print(f"  Running {config_name}...")
+            
+            x = torch.randn(B, N, device=device, dtype=dtype)
+            
+            # Function to time Metal
+            def run_metal():
+                y = fused_softmax(x, dim=-1)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Function to time Torch
+            def run_torch():
+                y = torch.softmax(x, dim=-1)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Warmup and verify correctness
+            y_metal = run_metal()
+            y_torch = run_torch()
+            error = (y_metal - y_torch).abs().max().item()
+            
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark Metal
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000 # ms
+            
+            # Benchmark Torch
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000 # ms
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                name, f"{B}x{N} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status, f"{error:.2e}"
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
+def benchmark_layernorm():
+    """Benchmark LayerNorm operations."""
+    print("Benchmarking LayerNorm...")
+    results = []
+    
+    try:
+        from metalcore import MetalLayerNorm
+    except ImportError:
+        print("  metalcore.MetalLayerNorm not available, skipping")
+        return results
+
+    # Extended configs
+    configs = [
+        ("Tiny", 32, 512),
+        ("Small", 64, 1024),
+        ("Llama-7B", 32, 4096),
+        ("Llama-13B", 32, 5120),
+        ("Llama-70B", 16, 8192),
+        ("Large Batch", 256, 4096),
+        ("Huge Batch", 1024, 4096),
+    ]
+    if LITE_MODE:
+        configs = [("Llama-7B", 32, 4096), ("GPU Win", 16, 32768)]
+    elif QUICK_MODE:
+        configs = configs[:4]
+    
+    iters = 1 if LITE_MODE else (100 if QUICK_MODE else 500)
+    warmup = 1 if LITE_MODE else 10
+        
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        for name, B, N in configs:
+            config_name = f"LayerNorm {name} ({B}x{N}) {dtype_name}"
+            print(f"  Running {config_name}...")
+            
+            x = torch.randn(B, N, device=device, dtype=dtype)
+            
+            model_metal = MetalLayerNorm(N).to(device).to(dtype)
+            model_torch = torch.nn.LayerNorm(N).to(device).to(dtype)
+            
+            # Function to time Metal
+            def run_metal():
+                y = model_metal(x)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Function to time Torch
+            def run_torch():
+                y = model_torch(x)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Warmup and verify
+            y_metal = run_metal()
+            y_torch = run_torch()
+            error = (y_metal - y_torch).abs().max().item()
+            
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark Metal
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000 # ms
+            
+            # Benchmark Torch
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000 # ms
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                name, f"{B}x{N} {dtype_name}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status, f"{error:.2e}"
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
+def benchmark_embedding_bag():
+    """Benchmark embedding bag operations."""
+    print("Benchmarking Embedding Bag...")
+    results = []
+    
+    try:
+        from metalcore import embedding_bag
+    except ImportError:
+        print("  metalcore.embedding_bag not available, skipping")
+        return results
+
+    # Extended configs: (name, num_embeddings, embedding_dim, batch_size, avg_bag_size)
+    configs = [
+        ("Small Vocab", 10000, 64, 32, 10),
+        ("Medium Vocab", 50000, 128, 64, 20),
+        ("Large Vocab", 100000, 256, 32, 50),
+        ("LLM Embedding", 32000, 4096, 16, 100),
+        ("Huge Vocab", 250000, 512, 16, 30),
+    ]
+    if LITE_MODE:
+        configs = [("Medium Vocab", 50000, 128, 64, 20)]
+    elif QUICK_MODE:
+        configs = configs[:3]
+    
+    iters = 1 if LITE_MODE else (50 if QUICK_MODE else 200)
+    warmup = 1 if LITE_MODE else 10
+        
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        if dtype != torch.float32:
+            continue  # embedding_bag only supports fp32
+            
+        for name, num_emb, dim, batch_size, avg_bag in configs:
+            config_name = f"EmbedBag {name} {dtype_name}"
+            print(f"  Running {config_name}...")
+            
+            weight = torch.randn(num_emb, dim, device=device, dtype=dtype)
+            # Create variable-length bags
+            bag_sizes = torch.randint(1, avg_bag * 2, (batch_size,))
+            total_indices = bag_sizes.sum().item()
+            indices = torch.randint(0, num_emb, (total_indices,), device=device)
+            offsets = torch.cat([torch.tensor([0]), bag_sizes.cumsum(0)]).to(device)
+            
+            # Function to time Metal
+            def run_metal():
+                y = embedding_bag(weight, indices, offsets, mode='sum')
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Function to time Torch (embedding_bag not well supported on MPS, use fallback)
+            def run_torch():
+                y, _, _, _ = torch.embedding_bag(weight, indices, offsets, False, 0)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Warmup
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark Metal
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000 # ms
+            
+            # Benchmark Torch
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000 # ms
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                name, f"{num_emb}x{dim}, B={batch_size}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
+def benchmark_scatter_gather():
+    """Benchmark scatter and gather operations."""
+    print("Benchmarking Scatter/Gather...")
+    results = []
+    
+    try:
+        from metalcore import gather, scatter_add
+    except ImportError:
+        print("  metalcore scatter/gather not available, skipping")
+        return results
+
+    # Extended configs: (name, src_size, num_indices)
+    configs = [
+        ("Small", 10000, 1000),
+        ("Medium", 100000, 10000),
+        ("Large", 1000000, 100000),
+        ("Huge", 10000000, 1000000),
+    ]
+    if LITE_MODE:
+        configs = [("Medium", 100000, 10000)]
+    elif QUICK_MODE:
+        configs = configs[:3]
+    
+    iters = 1 if LITE_MODE else (100 if QUICK_MODE else 500)
+    warmup = 1 if LITE_MODE else 10
+        
+    for dtype_name, dtype in BENCHMARK_DTYPES:
+        if dtype != torch.float32:
+            continue  # scatter/gather mainly fp32
+            
+        # Gather benchmarks
+        for name, src_size, num_idx in configs:
+            config_name = f"Gather {name} {dtype_name}"
+            print(f"  Running {config_name}...")
+            
+            src = torch.randn(src_size, device=device, dtype=dtype)
+            idx = torch.randint(0, src_size, (num_idx,), device=device)
+            
+            # Function to time Metal
+            def run_metal():
+                y = gather(src, idx, dim=0)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Function to time Torch
+            def run_torch():
+                y = torch.gather(src, 0, idx.to(torch.long))
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Warmup
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                f"Gather {name}", f"src={src_size}, idx={num_idx}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+        # Scatter Add benchmarks
+        for name, dst_size, num_idx in configs:
+            config_name = f"ScatterAdd {name} {dtype_name}"
+            print(f"  Running {config_name}...")
+            
+            dst = torch.zeros(dst_size, device=device, dtype=dtype)
+            idx = torch.randint(0, dst_size, (num_idx,), device=device)
+            src = torch.randn(num_idx, device=device, dtype=dtype)
+            
+            # Function to time Metal
+            def run_metal():
+                y = scatter_add(dst.clone(), idx, src, dim=0)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Function to time Torch
+            def run_torch():
+                y = dst.clone().scatter_add(0, idx.to(torch.long), src)
+                if device == 'mps': torch.mps.synchronize()
+                return y
+                
+            # Warmup
+            for _ in range(warmup):
+                run_metal()
+                run_torch()
+                
+            # Benchmark
+            start = time.time()
+            for _ in range(iters):
+                run_metal()
+            metal_time = (time.time() - start) / iters * 1000
+            
+            start = time.time()
+            for _ in range(iters):
+                run_torch()
+            torch_time = (time.time() - start) / iters * 1000
+            
+            ratio = metal_time / torch_time
+            status = color_ratio(ratio)
+            
+            results.append([
+                f"ScatterAdd {name}", f"dst={dst_size}, idx={num_idx}",
+                format_time(metal_time), format_time(torch_time),
+                f"{ratio:.2f}x", status
+            ])
+            print(f"    Metal: {format_time(metal_time)}, Torch: {format_time(torch_time)} -> {ratio:.2f}x {status}")
+        
+    return results
+
+
 def benchmark_sdpa():
     """Benchmark Scaled Dot Product Attention."""
     print("Benchmarking SDPA (Scaled Dot Product Attention)...")
@@ -1638,7 +2024,7 @@ def benchmark_pipeline():
     for _ in range(iters):
         Q1, R1 = mc.qr_batched(A_gpu)  # GPU wins here
         # Simulate a "slow" GPU op - we'll use the fused single QR as example
-        Q_single, R_single = mc.qr_fused(R1[0])  # GPU loses but no transfer
+        Q_single, R_single = mc.qr(R1[0])  # GPU loses but no transfer
         # Back to batched op
         result = Q1 @ Q1.transpose(-1, -2)  # GPU wins
     torch.mps.synchronize()
@@ -1813,6 +2199,54 @@ def main():
                 "Scaled Dot Product Attention with Flash Attention v2 tiling",
                 ["Config", "Shape", "Metal", "Torch", "Ratio", "Status", "Error"],
                 sdpa_results
+            )
+
+    # Fused Softmax benchmarks
+    softmax_results = []
+    if RUN_SOFTMAX:
+        softmax_results = benchmark_softmax()
+        if softmax_results:
+            results.add_section(
+                "Fused Softmax (metalcore)",
+                "Online softmax algorithm with SIMD reductions",
+                ["Config", "Shape", "Metal", "Torch", "Ratio", "Status", "Error"],
+                softmax_results
+            )
+    
+    # LayerNorm benchmarks
+    layernorm_results = []
+    if RUN_LAYERNORM:
+        layernorm_results = benchmark_layernorm()
+        if layernorm_results:
+            results.add_section(
+                "LayerNorm (metalcore)",
+                "Welford's algorithm for fused mean/variance",
+                ["Config", "Shape", "Metal", "Torch", "Ratio", "Status", "Error"],
+                layernorm_results
+            )
+    
+    # Embedding Bag benchmarks
+    embedding_results = []
+    if RUN_EMBEDDING:
+        embedding_results = benchmark_embedding_bag()
+        if embedding_results:
+            results.add_section(
+                "Embedding Bag (metalcore)",
+                "Coalesced reads for embedding lookups and aggregation",
+                ["Config", "Shape", "Metal", "Torch", "Ratio", "Status"],
+                embedding_results
+            )
+    
+    # Scatter/Gather benchmarks
+    scatter_results = []
+    if RUN_SCATTER:
+        scatter_results = benchmark_scatter_gather()
+        if scatter_results:
+            results.add_section(
+                "Scatter/Gather (metalcore)",
+                "Atomic scatter_add and vectorized gather operations",
+                ["Op", "Shape", "Metal", "Torch", "Ratio", "Status"],
+                scatter_results
             )
 
     # Pipeline benchmarks

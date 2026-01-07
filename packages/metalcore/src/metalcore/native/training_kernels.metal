@@ -583,6 +583,76 @@ kernel void rmsnorm_fwd_half_vec(
 }
 
 
+// -----------------------------------------------------------------------------
+// RMSNorm BFloat16 Forward
+// -----------------------------------------------------------------------------
+#if __METAL_VERSION__ >= 310
+
+kernel void rmsnorm_fwd_bfloat(
+    device const bfloat* X [[buffer(0)]],
+    device const bfloat* W [[buffer(1)]],
+    device bfloat* Y [[buffer(2)]],
+    device float* Rstd [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 threadsPerThreadgroup [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint tid_x = tid.x;
+    uint offset = row * N;
+    
+    // Accumulate in float for stability
+    float sum_sq = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float val = float(X[offset + i]);
+        sum_sq += val * val;
+    }
+    
+    float simd_sum_sq = simd_sum(sum_sq);
+    threadgroup float shared_sums[32];
+    
+    if (simd_lane_id == 0) {
+        shared_sums[simd_group_id] = simd_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float total_sum_sq = 0.0f;
+    if (simd_group_id == 0) {
+        uint num_simd_groups = (threadsPerThreadgroup.x + 31) / 32;
+        float partial = 0.0f;
+        if (simd_lane_id < num_simd_groups) {
+            partial = shared_sums[simd_lane_id];
+        }
+        total_sum_sq = simd_sum(partial);
+    }
+    
+    if (simd_group_id == 0 && simd_lane_id == 0) {
+        shared_sums[0] = total_sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    total_sum_sq = shared_sums[0];
+    
+    float rstd = rsqrt(total_sum_sq / float(N) + eps);
+    
+    if (tid_x == 0) {
+        Rstd[row] = rstd;
+    }
+    
+    for (uint i = tid_x; i < N; i += threadsPerThreadgroup.x) {
+        float val = float(X[offset + i]);
+        float w = float(W[i]);
+        Y[offset + i] = bfloat(val * rstd * w);
+    }
+}
+
+#endif // __METAL_VERSION__ >= 310
+
+
 kernel void rmsnorm_bwd_dx_half(
     device const half* dY [[buffer(0)]],
     device const half* X [[buffer(1)]],
@@ -1197,13 +1267,13 @@ kernel void rmsnorm_bwd_dw_vec4(
 }
 
 // =============================================================================
-// FUSED SOFTMAX - Online Algorithm (single pass max + sum)
+// FUSED SOFTMAX - Optimized Single-Pass with Threadgroup Memory
 // =============================================================================
-// Uses online softmax for numerical stability in a single pass:
-// 1. Track running max and scaled sum simultaneously
-// 2. SIMD reduction for threadgroup operations
-// 3. float4 vectorization for large dimensions
+// Key optimization: Load entire row into threadgroup memory ONCE.
+// All max/sum/normalize operations happen in fast on-chip SRAM.
+// Based on Triton's fused softmax pattern.
 
+// For rows that fit in threadgroup memory (dim <= 8192)
 kernel void fused_softmax(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -1223,68 +1293,72 @@ kernel void fused_softmax(
     uint row_offset = row * dim * inner_size;
     uint tid_x = tid.x;
     
-    // Phase 1: Online max finding with SIMD reduction
+    // Threadgroup memory to cache the row - avoid repeated global reads
+    // Max 8192 elements (32KB at fp32) - sufficient for most vocab sizes
+    threadgroup float row_cache[8192];
+    
+    // PHASE 1: Load row into threadgroup memory + find max in one pass
     float local_max = -INFINITY;
     for (uint i = tid_x; i < dim; i += tg_size.x) {
         float val = input[row_offset + i * inner_size];
+        row_cache[i] = val;  // Cache in threadgroup memory
         local_max = max(local_max, val);
     }
     
     // SIMD reduction for max
-    float simd_max = simd_max(local_max);
+    float simd_max_val = simd_max(local_max);
     
-    threadgroup float shared_max[32];
+    threadgroup float shared_reduce[32];
     if (simd_lane == 0) {
-        shared_max[simd_group] = simd_max;
+        shared_reduce[simd_group] = simd_max_val;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     float global_max = -INFINITY;
     if (simd_group == 0) {
         uint num_groups = (tg_size.x + 31) / 32;
-        float partial = (simd_lane < num_groups) ? shared_max[simd_lane] : -INFINITY;
+        float partial = (simd_lane < num_groups) ? shared_reduce[simd_lane] : -INFINITY;
         global_max = simd_max(partial);
     }
     if (simd_group == 0 && simd_lane == 0) {
-        shared_max[0] = global_max;
+        shared_reduce[0] = global_max;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    global_max = shared_max[0];
+    global_max = shared_reduce[0];
     
-    // Phase 2: Compute sum of exp(x - max)
+    // PHASE 2: Compute exp(x - max) in-place in threadgroup memory + sum
     float local_sum = 0.0f;
     for (uint i = tid_x; i < dim; i += tg_size.x) {
-        float val = input[row_offset + i * inner_size];
-        local_sum += exp(val - global_max);
+        float exp_val = exp(row_cache[i] - global_max);
+        row_cache[i] = exp_val;  // Store exp result back to cache
+        local_sum += exp_val;
     }
     
     // SIMD reduction for sum
     float simd_sum_val = simd_sum(local_sum);
-    
-    threadgroup float shared_sum[32];
     if (simd_lane == 0) {
-        shared_sum[simd_group] = simd_sum_val;
+        shared_reduce[simd_group] = simd_sum_val;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     float global_sum = 0.0f;
     if (simd_group == 0) {
         uint num_groups = (tg_size.x + 31) / 32;
-        float partial = (simd_lane < num_groups) ? shared_sum[simd_lane] : 0.0f;
+        float partial = (simd_lane < num_groups) ? shared_reduce[simd_lane] : 0.0f;
         global_sum = simd_sum(partial);
     }
     if (simd_group == 0 && simd_lane == 0) {
-        shared_sum[0] = global_sum;
+        shared_reduce[0] = global_sum;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    global_sum = shared_sum[0];
+    global_sum = shared_reduce[0];
     
     float inv_sum = 1.0f / global_sum;
     
-    // Phase 3: Write normalized output
+    // PHASE 3: Normalize from threadgroup cache and write to global memory
+    // This is the ONLY global memory write
     for (uint i = tid_x; i < dim; i += tg_size.x) {
-        float val = input[row_offset + i * inner_size];
-        output[row_offset + i * inner_size] = exp(val - global_max) * inv_sum;
+        output[row_offset + i * inner_size] = row_cache[i] * inv_sum;
     }
 }
 
@@ -1361,9 +1435,333 @@ kernel void fused_softmax_vec4(
     }
 }
 
+// Half-precision softmax with native half types for 2x bandwidth
+// Computes in float for numerical stability, reads/writes in half
+kernel void fused_softmax_half(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],
+    constant uint& outer_size [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    if (row >= outer_size) return;
+    
+    uint row_offset = row * dim;
+    uint tid_x = tid.x;
+    
+    // Use float threadgroup cache for numerical stability
+    threadgroup float row_cache[8192];
+    
+    // PHASE 1: Load half → float into cache + find max
+    float local_max = -INFINITY;
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float val = float(input[row_offset + i]);  // half → float
+        row_cache[i] = val;
+        local_max = max(local_max, val);
+    }
+    
+    // SIMD reduction for max
+    float simd_max_val = simd_max(local_max);
+    threadgroup float shared_reduce[32];
+    if (simd_lane == 0) shared_reduce[simd_group] = simd_max_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_max = -INFINITY;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float p = (simd_lane < ng) ? shared_reduce[simd_lane] : -INFINITY;
+        global_max = simd_max(p);
+    }
+    if (simd_group == 0 && simd_lane == 0) shared_reduce[0] = global_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_reduce[0];
+    
+    // PHASE 2: Compute exp in-place + sum
+    float local_sum = 0.0f;
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float exp_val = exp(row_cache[i] - global_max);
+        row_cache[i] = exp_val;
+        local_sum += exp_val;
+    }
+    
+    // SIMD reduction for sum
+    float simd_sum_val = simd_sum(local_sum);
+    if (simd_lane == 0) shared_reduce[simd_group] = simd_sum_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_sum = 0.0f;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float p = (simd_lane < ng) ? shared_reduce[simd_lane] : 0.0f;
+        global_sum = simd_sum(p);
+    }
+    if (simd_group == 0 && simd_lane == 0) shared_reduce[0] = global_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_sum = shared_reduce[0];
+    
+    float inv_sum = 1.0f / global_sum;
+    
+    // PHASE 3: Normalize and write as half
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        output[row_offset + i] = half(row_cache[i] * inv_sum);  // float → half
+    }
+}
+
 // =============================================================================
-// LAYERNORM - Welford's Algorithm for Fused Mean/Variance
+// BFloat16 Softmax with Direct Bit Truncation
 // =============================================================================
+// bf16 = upper 16 bits of fp32 (same exponent, truncated mantissa)
+// Direct bit shift is faster than formal conversion
+
+#if __METAL_VERSION__ >= 310
+
+// Macros for guaranteed zero-overhead bf16↔fp32 conversion
+// bf16 is literally upper 16 bits of fp32 - just bit manipulation
+#define FLOAT_TO_BFLOAT_FAST(f) as_type<bfloat>(ushort(as_type<uint>(f) >> 16))
+#define BFLOAT_TO_FLOAT_FAST(b) as_type<float>(uint(as_type<ushort>(b)) << 16)
+
+kernel void fused_softmax_bfloat(
+    device const bfloat* input [[buffer(0)]],
+    device bfloat* output [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],
+    constant uint& outer_size [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    if (row >= outer_size) return;
+    
+    uint row_offset = row * dim;
+    uint tid_x = tid.x;
+    
+    // Float cache for numerical stability
+    threadgroup float row_cache[8192];
+    
+    // PHASE 1: Load bf16 → fp32 into cache + find max
+    float local_max = -INFINITY;
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float val = BFLOAT_TO_FLOAT_FAST(input[row_offset + i]);  // bf16 → fp32
+        row_cache[i] = val;
+        local_max = max(local_max, val);
+    }
+    
+    // SIMD reduction for max
+    float simd_max_val = simd_max(local_max);
+    threadgroup float shared_reduce[32];
+    if (simd_lane == 0) shared_reduce[simd_group] = simd_max_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_max = -INFINITY;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float p = (simd_lane < ng) ? shared_reduce[simd_lane] : -INFINITY;
+        global_max = simd_max(p);
+    }
+    if (simd_group == 0 && simd_lane == 0) shared_reduce[0] = global_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_reduce[0];
+    
+    // PHASE 2: Compute exp in-place + sum
+    float local_sum = 0.0f;
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        float exp_val = exp(row_cache[i] - global_max);
+        row_cache[i] = exp_val;
+        local_sum += exp_val;
+    }
+    
+    // SIMD reduction for sum
+    float simd_sum_val = simd_sum(local_sum);
+    if (simd_lane == 0) shared_reduce[simd_group] = simd_sum_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_sum = 0.0f;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        float p = (simd_lane < ng) ? shared_reduce[simd_lane] : 0.0f;
+        global_sum = simd_sum(p);
+    }
+    if (simd_group == 0 && simd_lane == 0) shared_reduce[0] = global_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_sum = shared_reduce[0];
+    
+    float inv_sum = 1.0f / global_sum;
+    
+    // PHASE 3: Normalize and write as bf16 (direct bit truncation)
+    for (uint i = tid_x; i < dim; i += tg_size.x) {
+        output[row_offset + i] = FLOAT_TO_BFLOAT_FAST(row_cache[i] * inv_sum);
+    }
+}
+
+#endif // __METAL_VERSION__ >= 310
+
+// Half-precision layernorm with half4 vectorization
+// Computes in float for stability, half4 for bandwidth
+kernel void layernorm_fwd_half(
+    device const half* input [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    device float* mean_out [[buffer(4)]],
+    device float* rstd_out [[buffer(5)]],
+    constant uint& N [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    // PASS 1: Compute stats with half4 vectorized loads
+    float local_sum = 0.0f;
+    float local_sum_sq = 0.0f;
+    
+    uint N_vec = N / 4;
+    device const half4* input_vec = (device const half4*)(input + offset);
+    
+    for (uint i = tid_x; i < N_vec; i += tg_size.x) {
+        half4 h = input_vec[i];
+        float4 v = float4(h);  // half4 → float4
+        local_sum += v.x + v.y + v.z + v.w;
+        local_sum_sq += v.x*v.x + v.y*v.y + v.z*v.z + v.w*v.w;
+    }
+    // Remainder
+    for (uint i = N_vec * 4 + tid_x; i < N; i += tg_size.x) {
+        float v = float(input[offset + i]);
+        local_sum += v;
+        local_sum_sq += v * v;
+    }
+    
+    // SIMD reduction
+    float simd_s = simd_sum(local_sum);
+    float simd_sq = simd_sum(local_sum_sq);
+    
+    threadgroup float shared_s[32], shared_sq[32];
+    if (simd_lane == 0) { shared_s[simd_group] = simd_s; shared_sq[simd_group] = simd_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float tot_s = 0, tot_sq = 0;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        tot_s = simd_sum((simd_lane < ng) ? shared_s[simd_lane] : 0.0f);
+        tot_sq = simd_sum((simd_lane < ng) ? shared_sq[simd_lane] : 0.0f);
+    }
+    if (simd_group == 0 && simd_lane == 0) { shared_s[0] = tot_s; shared_sq[0] = tot_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tot_s = shared_s[0]; tot_sq = shared_sq[0];
+    
+    float mean = tot_s / float(N);
+    float rstd = rsqrt(tot_sq / float(N) - mean * mean + eps);
+    
+    if (tid_x == 0) { mean_out[row] = mean; rstd_out[row] = rstd; }
+    
+    // PASS 2: Normalize with half4 vectorized load/store
+    device const half4* weight_vec = (device const half4*)weight;
+    device const half4* bias_vec = (device const half4*)bias;
+    device half4* output_vec = (device half4*)(output + offset);
+    
+    for (uint i = tid_x; i < N_vec; i += tg_size.x) {
+        float4 v = float4(input_vec[i]);
+        float4 w = float4(weight_vec[i]);
+        float4 b = float4(bias_vec[i]);
+        float4 normalized = (v - mean) * rstd;
+        output_vec[i] = half4(normalized * w + b);
+    }
+    // Remainder
+    for (uint i = N_vec * 4 + tid_x; i < N; i += tg_size.x) {
+        float v = float(input[offset + i]);
+        float normalized = (v - mean) * rstd;
+        output[offset + i] = half(normalized * float(weight[i]) + float(bias[i]));
+    }
+}
+
+// =============================================================================
+// BFloat16 LayerNorm with Direct Bit Truncation
+// =============================================================================
+#if __METAL_VERSION__ >= 310
+
+kernel void layernorm_fwd_bfloat(
+    device const bfloat* input [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const bfloat* bias [[buffer(2)]],
+    device bfloat* output [[buffer(3)]],
+    device float* mean_out [[buffer(4)]],
+    device float* rstd_out [[buffer(5)]],
+    constant uint& N [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    // PASS 1: Compute stats (all in fp32)
+    float local_sum = 0.0f;
+    float local_sum_sq = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float v = BFLOAT_TO_FLOAT_FAST(input[offset + i]);  // bf16 → fp32
+        local_sum += v;
+        local_sum_sq += v * v;
+    }
+    
+    // SIMD reduction
+    float simd_s = simd_sum(local_sum);
+    float simd_sq = simd_sum(local_sum_sq);
+    
+    threadgroup float shared_s[32], shared_sq[32];
+    if (simd_lane == 0) { shared_s[simd_group] = simd_s; shared_sq[simd_group] = simd_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float tot_s = 0, tot_sq = 0;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        tot_s = simd_sum((simd_lane < ng) ? shared_s[simd_lane] : 0.0f);
+        tot_sq = simd_sum((simd_lane < ng) ? shared_sq[simd_lane] : 0.0f);
+    }
+    if (simd_group == 0 && simd_lane == 0) { shared_s[0] = tot_s; shared_sq[0] = tot_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tot_s = shared_s[0]; tot_sq = shared_sq[0];
+    
+    float mean = tot_s / float(N);
+    float rstd = rsqrt(tot_sq / float(N) - mean * mean + eps);
+    
+    if (tid_x == 0) { mean_out[row] = mean; rstd_out[row] = rstd; }
+    
+    // PASS 2: Normalize and write as bf16 (direct bit truncation)
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float v = BFLOAT_TO_FLOAT_FAST(input[offset + i]);
+        float w = BFLOAT_TO_FLOAT_FAST(weight[i]);
+        float b = BFLOAT_TO_FLOAT_FAST(bias[i]);
+        float normalized = (v - mean) * rstd;
+        output[offset + i] = FLOAT_TO_BFLOAT_FAST(normalized * w + b);
+    }
+}
+
+#endif // __METAL_VERSION__ >= 310
+
+// =============================================================================
+// LAYERNORM - Optimized Vectorized with Minimal TG Memory
+// =============================================================================
+// Key optimizations:
+// 1. float4 vectorized loads for 4x bandwidth
+// 2. Minimal threadgroup memory (just reduction buffers)
+// 3. SIMD shuffle reductions (no TG barriers in hot loop)
 // y = (x - mean) / sqrt(var + eps) * weight + bias
 
 kernel void layernorm_fwd(
@@ -1385,48 +1783,54 @@ kernel void layernorm_fwd(
     uint offset = row * N;
     uint tid_x = tid.x;
     
-    // Welford's online algorithm for mean and variance
+    // PASS 1: Compute mean and variance with vectorized loads
     float local_sum = 0.0f;
     float local_sum_sq = 0.0f;
     
-    for (uint i = tid_x; i < N; i += tg_size.x) {
-        float val = input[offset + i];
-        local_sum += val;
-        local_sum_sq += val * val;
+    // Vectorized path for N divisible by 4
+    uint N_vec = N / 4;
+    device const float4* input_vec = (device const float4*)(input + offset);
+    
+    for (uint i = tid_x; i < N_vec; i += tg_size.x) {
+        float4 v = input_vec[i];
+        local_sum += v.x + v.y + v.z + v.w;
+        local_sum_sq += v.x*v.x + v.y*v.y + v.z*v.z + v.w*v.w;
+    }
+    // Handle remainder
+    for (uint i = N_vec * 4 + tid_x; i < N; i += tg_size.x) {
+        float v = input[offset + i];
+        local_sum += v;
+        local_sum_sq += v * v;
     }
     
-    // SIMD reduction
-    float simd_sum_val = simd_sum(local_sum);
-    float simd_sum_sq = simd_sum(local_sum_sq);
+    // SIMD reduction (no TG barrier needed)
+    float simd_s = simd_sum(local_sum);
+    float simd_sq = simd_sum(local_sum_sq);
     
-    threadgroup float shared_sum[32];
-    threadgroup float shared_sum_sq[32];
-    
+    // Cross-simdgroup reduction with minimal TG memory
+    threadgroup float shared_s[32], shared_sq[32];
     if (simd_lane == 0) {
-        shared_sum[simd_group] = simd_sum_val;
-        shared_sum_sq[simd_group] = simd_sum_sq;
+        shared_s[simd_group] = simd_s;
+        shared_sq[simd_group] = simd_sq;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
-    float total_sum = 0.0f;
-    float total_sum_sq = 0.0f;
+    float total_s = 0, total_sq = 0;
     if (simd_group == 0) {
         uint ng = (tg_size.x + 31) / 32;
-        float ps = (simd_lane < ng) ? shared_sum[simd_lane] : 0.0f;
-        float psq = (simd_lane < ng) ? shared_sum_sq[simd_lane] : 0.0f;
-        total_sum = simd_sum(ps);
-        total_sum_sq = simd_sum(psq);
+        total_s = simd_sum((simd_lane < ng) ? shared_s[simd_lane] : 0.0f);
+        total_sq = simd_sum((simd_lane < ng) ? shared_sq[simd_lane] : 0.0f);
     }
     if (simd_group == 0 && simd_lane == 0) {
-        shared_sum[0] = total_sum;
-        shared_sum_sq[0] = total_sum_sq;
+        shared_s[0] = total_s;
+        shared_sq[0] = total_sq;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    total_sum = shared_sum[0];
-    total_sum_sq = shared_sum_sq[0];
+    total_s = shared_s[0];
+    total_sq = shared_sq[0];
     
-    float mean = total_sum / float(N);
-    float var = total_sum_sq / float(N) - mean * mean;
+    float mean = total_s / float(N);
+    float var = total_sq / float(N) - mean * mean;
     float rstd = rsqrt(var + eps);
     
     // Save for backward
@@ -1435,10 +1839,22 @@ kernel void layernorm_fwd(
         rstd_out[row] = rstd;
     }
     
-    // Normalize and apply affine transform
-    for (uint i = tid_x; i < N; i += tg_size.x) {
-        float val = input[offset + i];
-        float normalized = (val - mean) * rstd;
+    // PASS 2: Normalize with vectorized load/store
+    device const float4* weight_vec = (device const float4*)weight;
+    device const float4* bias_vec = (device const float4*)bias;
+    device float4* output_vec = (device float4*)(output + offset);
+    
+    for (uint i = tid_x; i < N_vec; i += tg_size.x) {
+        float4 v = input_vec[i];
+        float4 w = weight_vec[i];
+        float4 b = bias_vec[i];
+        float4 normalized = (v - mean) * rstd;
+        output_vec[i] = normalized * w + b;
+    }
+    // Handle remainder
+    for (uint i = N_vec * 4 + tid_x; i < N; i += tg_size.x) {
+        float v = input[offset + i];
+        float normalized = (v - mean) * rstd;
         output[offset + i] = normalized * weight[i] + bias[i];
     }
 }
@@ -1516,11 +1932,11 @@ kernel void embedding_bag_sum(
     device float* output [[buffer(4)]],            // [batch_size, dim]
     constant uint& dim [[buffer(5)]],
     constant uint& has_weights [[buffer(6)]],
-    uint2 tgid [[threadgroup_position_in_grid]],
-    uint tid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]],
+    uint2 tgid [[threadgroup_position_in_grid]]
 ) {
-    uint batch_idx = tgid.x;
-    uint d = tgid.y * blockDim.x + tid;
+    uint batch_idx = gid.y;
+    uint d = gid.x;
     
     if (d >= dim) return;
     
