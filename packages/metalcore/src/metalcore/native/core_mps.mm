@@ -951,7 +951,6 @@ torch::Tensor larfb_metal(
     TORCH_CHECK(T.device().type() == at::kMPS, "T must be on MPS device");
     
     int64_t M = C.size(0);
-    int64_t N = C.size(1);
     int64_t K = V.size(1);  // Number of reflectors
     
     // Build V_full efficiently using tensor operations
@@ -2279,7 +2278,6 @@ std::vector<torch::Tensor> eigh_forward(torch::Tensor A) {
     
     auto [pairs_cpu, num_steps] = svd_generate_ordering(N);
     int num_pairs = N / 2;
-    int threads_per_pair = std::min(32, std::max(1, 1024 / num_pairs));
     
     torch::Tensor PairsTens = torch::tensor(pairs_cpu, torch::dtype(torch::kInt32).device(torch::kCPU)).contiguous();
     PairsTens = PairsTens.to(A.device());

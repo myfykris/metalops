@@ -24,7 +24,6 @@ using namespace metal;
 constant uint BLOCK_M = 64;    // Queries per threadgroup
 constant uint BLOCK_N = 64;    // Keys per iteration
 constant uint BLOCK_D = 128;   // Max head dimension (supports up to 128)
-constant uint WARP_SIZE = 32;  // SIMD width on Apple Silicon
 
 // =============================================================================
 // Vectorized Load/Store Macros (guaranteed zero overhead)
