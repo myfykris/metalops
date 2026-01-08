@@ -25,9 +25,17 @@ Key scripts in this repo:
 
 ## Common Pitfalls
 - **Stale Encoder**: Allocate tensors BEFORE `stream->commandEncoder()`. PyTorch ops invalidate encoders.
+- **Forward-Pass Sync**: Use `COMMIT` (not `COMMIT_AND_WAIT`) for ops that run mid-forward-pass to avoid "command encoder already encoding" errors.
 - **Encoder Conflicts**: Call `stream->synchronize(SyncType::COMMIT)` before creating encoder in backward pass.
 - **threadgroup_barrier**: Use `mem_flags::mem_device` for device memory, `mem_threadgroup` for shared.
 - **Shared Memory Size**: Must be set with `setThreadgroupMemoryLength` before dispatch.
+
+## Command Buffer Integration (HuggingFace/Transformers)
+- **Problem**: metalcore ops in HuggingFace model forward passes crash with "command encoder already encoding"
+- **Root Cause**: `COMMIT_AND_WAIT` forces full GPU sync, conflicts with PyTorch's active encoder
+- **Fix**: Use `SyncType::COMMIT` for forward-pass ops (GELU, SiLU, RMSNorm, LayerNorm, EmbeddingBag, Softmax)
+- **Keep COMMIT_AND_WAIT**: For standalone ops that need immediate results (SVD, QR, EIGH, Cholesky, Solve)
+- **AdamW**: Runs in optimizer.step() (after backward), no conflict - can use `COMMIT_AND_WAIT`
 
 ## Training Ops Gotchas
 - **Atomics in Backward**: SDPA backward uses `atomic_fetch_add`, which is slower but thread-safe.
@@ -46,3 +54,16 @@ Key scripts in this repo:
 - **Tests MUST be import-only**: Don't add tests that call Metal kernels
 - **Local testing only**: Run `pytest` and `adamw_stress_test.py` on Apple Silicon
 - **See**: `tests/test_imports.py` header comments for detailed guidance
+
+## PyTorch Override System (`overrides.py`)
+- **Purpose**: `enable_pytorch_overrides()` monkey-patches F.silu, F.gelu, F.embedding_bag to use metalcore
+- **Default Enables**: activations (silu, gelu) + embedding_bag (50-100x win over CPU fallback)
+- **Default Disables**: normalization, softmax (near parity with PyTorch)
+- **Usage**: Call once at startup: `import metalcore; metalcore.enable_pytorch_overrides()`
+- **Limitation**: Cannot fully restore originals - restart interpreter for clean state
+
+## Unused Variable Warnings (Known Cruft)
+These are NOT half-implemented features, just cruft:
+- `MAX_PANEL_M`, `MAX_PANEL_N`, `CHOL_MAX_N`, `WARP_SIZE` in .metal files - tuning constants
+- `int64_t N` at line ~954 in core_mps.mm - declared but unused in apply_householder_panel
+- `threads_per_pair` at line ~2282 - duplicate declaration (used elsewhere)

@@ -13,7 +13,8 @@ packages/metalcore/
 │   ├── sdpa_kernels.metal       # Flash Attention v2
 │   └── core_mps.mm              # C++ dispatch + PYBIND11
 └── src/metalcore/
-    ├── __init__.py      # Public API + enable_metal_sdpa()
+    ├── __init__.py      # Public API + enable_slow_metal_sdpa()
+    ├── overrides.py     # PyTorch F.silu/F.gelu/embedding_bag overrides
     ├── svd.py           # SVD with De Rijk optimization
     ├── qr.py            # QR decomposition
     ├── cholesky.py      # Cholesky factorization
@@ -21,7 +22,7 @@ packages/metalcore/
     ├── rmsnorm.py       # MetalRMSNorm module
     ├── optim.py         # MetalAdamW optimizer
     ├── activations.py   # metal_gelu, metal_silu
-    └── sdpa.py          # Flash Attention v2
+    └── sdpa.py          # Flash Attention v2 (SLOWER than PyTorch native!)
 ```
 
 ## Components

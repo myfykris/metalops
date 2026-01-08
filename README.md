@@ -24,6 +24,7 @@ MIT
 | **RMSNorm** | Fused RMS Normalization | **2.5x faster** than PyTorch |
 | **AdamW** | Fused Optimizer Step | **2.9x faster** than torch.optim.AdamW |
 | **GELU/SiLU** | Vectorized Activations | Up to **4x faster** |
+| **EmbeddingBag** | Optimized Embedding Sum | **50-100x faster** (PyTorch falls back to CPU) |
 | **SDPA** | Flash Attention v2 | Tiled attention with causal masking |
 
 ## Installation
@@ -62,6 +63,19 @@ optimizer = MetalAdamW(model.parameters(), lr=1e-3)
 
 # GELU/SiLU activations
 y = metal_gelu(x)
+```
+
+### Transparent PyTorch Integration
+
+Automatically accelerate any model using F.silu, F.gelu, or embedding_bag:
+
+```python
+import metalcore
+metalcore.enable_pytorch_overrides()
+
+# Now any model using F.silu/F.gelu on MPS uses metalcore
+# embedding_bag avoids CPU fallback (50-100x faster)
+model = AutoModelForCausalLM.from_pretrained("...", device_map="mps")
 ```
 
 ## Performance
