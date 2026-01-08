@@ -29,7 +29,7 @@ from .optim import MetalAdamW
 from .activations import metal_gelu, metal_silu, MetalGELU, MetalSiLU
 from .sdpa import metal_scaled_dot_product_attention
 from .comfy_patch import patch_comfy, unpatch_comfy, is_patched
-from .overrides import enable_pytorch_overrides, disable_pytorch_overrides, get_active_overrides
+from .overrides import enable_pytorch_overrides, disable_pytorch_overrides, get_active_overrides, patch_transformers_rmsnorm
 from .ops import (
     fused_softmax, MetalSoftmax,
     layer_norm, MetalLayerNorm,
@@ -148,4 +148,5 @@ __all__ = [
     "enable_pytorch_overrides",
     "disable_pytorch_overrides",
     "get_active_overrides",
+    "patch_transformers_rmsnorm",
 ]

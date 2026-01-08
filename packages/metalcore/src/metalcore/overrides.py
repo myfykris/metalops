@@ -173,3 +173,72 @@ def disable_pytorch_overrides(
 def get_active_overrides() -> set:
     """Return the set of currently active override names."""
     return _active_overrides.copy()
+
+
+def patch_transformers_rmsnorm(model, verbose: bool = False) -> int:
+    """
+    Replace all RMSNorm modules in a HuggingFace Transformers model with MetalRMSNorm.
+    
+    This patches:
+    - Qwen2RMSNorm
+    - LlamaRMSNorm
+    - MistralRMSNorm
+    - Any other *RMSNorm module
+    
+    Args:
+        model: A HuggingFace model (e.g., AutoModelForCausalLM)
+        verbose: Print which modules were patched
+    
+    Returns:
+        Number of modules patched
+    
+    Example:
+        >>> from transformers import AutoModelForCausalLM
+        >>> import metalcore
+        >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B", device_map="mps")
+        >>> patched = metalcore.patch_transformers_rmsnorm(model, verbose=True)
+        >>> print(f"Patched {patched} RMSNorm modules")
+    """
+    from metalcore import MetalRMSNorm
+    
+    patched_count = 0
+    
+    # Find all modules that look like RMSNorm
+    for name, module in list(model.named_modules()):
+        class_name = type(module).__name__
+        
+        # Check if it's an RMSNorm variant
+        if 'RMSNorm' in class_name:
+            # Get the hidden size from weight shape
+            if hasattr(module, 'weight'):
+                hidden_size = module.weight.shape[0]
+                device = module.weight.device
+                dtype = module.weight.dtype
+                
+                # Get eps if available
+                eps = getattr(module, 'eps', 1e-6) or getattr(module, 'variance_epsilon', 1e-6) or 1e-6
+                
+                # Create replacement
+                new_module = MetalRMSNorm(hidden_size, eps=eps)
+                new_module.weight.data = module.weight.data.clone()
+                new_module = new_module.to(device=device, dtype=dtype)
+                
+                # Replace in parent
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                
+                if parent_name:
+                    parent = model.get_submodule(parent_name)
+                else:
+                    parent = model
+                
+                setattr(parent, child_name, new_module)
+                patched_count += 1
+                
+                if verbose:
+                    print(f"metalcore: Patched {name} ({class_name} -> MetalRMSNorm)")
+    
+    if verbose:
+        print(f"metalcore: Total {patched_count} modules patched")
+    
+    return patched_count

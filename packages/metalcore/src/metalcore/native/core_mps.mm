@@ -2416,7 +2416,7 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
 
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        auto encoder = stream->commandEncoder();
         
         if (use_vec4) {
              [encoder setComputePipelineState:pso_vec4];
@@ -2442,8 +2442,8 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
              [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
         }
         
-        [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        stream->synchronize(SyncType::NONE);  // Let PyTorch batch commands
     }
     
     return std::make_tuple(Y, Rstd);
@@ -2576,7 +2576,7 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rmsnorm_metal(
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        auto encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.fusedAddRmsnormPSO];
         [encoder setBuffer:getMTLBufferStorage(input_c) offset:input_c.storage_offset() * 4 atIndex:0];
@@ -2590,8 +2590,8 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rmsnorm_metal(
         NSUInteger threads = std::min((NSUInteger)N, (NSUInteger)1024);
         [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
         
-        [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        stream->synchronize(SyncType::NONE);  // Let PyTorch batch commands
     }
     
     return std::make_tuple(input_c, Rstd);
@@ -2917,7 +2917,7 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        auto encoder = stream->commandEncoder();
         
         if (numel_vec > 0) {
             [encoder setComputePipelineState:vecPSO];
@@ -2940,8 +2940,8 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         }
         
-        [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        stream->synchronize(SyncType::NONE);  // Let PyTorch batch commands
     }
     
     return Y;
@@ -3057,7 +3057,7 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        auto encoder = stream->commandEncoder();
         
         if (numel_vec > 0) {
             [encoder setComputePipelineState:vecPSO];
@@ -3080,8 +3080,8 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)tail, 1, 1)];
         }
         
-        [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        stream->synchronize(SyncType::NONE);  // Let PyTorch batch commands
     }
     
     return Y;
@@ -3498,8 +3498,8 @@ torch::Tensor fused_softmax_metal(torch::Tensor input, int64_t dim_) {
 
     
     @autoreleasepool {
-        id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
-        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:getMTLBufferStorage(x) offset:x.storage_offset() * x.element_size() atIndex:0];
@@ -3520,8 +3520,8 @@ torch::Tensor fused_softmax_metal(torch::Tensor input, int64_t dim_) {
         [encoder dispatchThreadgroups:MTLSizeMake(outer_size, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
         
-        [encoder endEncoding];
-        torch::mps::synchronize();
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        // No sync - let PyTorch batch commands
     }
     
     return output;
@@ -3585,8 +3585,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> layernorm_fwd_metal(
     }
     
     @autoreleasepool {
-        id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
-        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:getMTLBufferStorage(x) offset:x.storage_offset() * x.element_size() atIndex:0];
@@ -3604,8 +3604,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> layernorm_fwd_metal(
         [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
         
-        [encoder endEncoding];
-        torch::mps::synchronize();
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        // No sync - let PyTorch batch commands
     }
     
     return std::make_tuple(output, mean, rstd);
@@ -3643,8 +3643,8 @@ torch::Tensor embedding_bag_metal(
     }
     
     @autoreleasepool {
-        id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
-        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        auto stream = at::mps::getCurrentMPSStream();
+        auto encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.embeddingBagSimplePSO];
         [encoder setBuffer:getMTLBufferStorage(w) offset:w.storage_offset() * w.element_size() atIndex:0];
@@ -3664,8 +3664,8 @@ torch::Tensor embedding_bag_metal(
         [encoder dispatchThreads:MTLSizeMake(dim, batch_size, 1)
            threadsPerThreadgroup:MTLSizeMake(std::min(256UL, static_cast<NSUInteger>(dim)), 1, 1)];
         
-        [encoder endEncoding];
-        torch::mps::synchronize();
+        // Don't call endEncoding - PyTorch manages encoder lifecycle
+        // No sync - let PyTorch batch commands
     }
     
     return output;
