@@ -2443,7 +2443,7 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_fwd_metal(torch::Tensor X, torc
         }
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     return std::make_tuple(Y, Rstd);
@@ -2591,7 +2591,7 @@ std::tuple<torch::Tensor, torch::Tensor> fused_add_rmsnorm_metal(
         [encoder dispatchThreadgroups:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     return std::make_tuple(input_c, Rstd);
@@ -2941,7 +2941,7 @@ torch::Tensor gelu_fwd_metal(torch::Tensor X) {
         }
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     return Y;
@@ -3008,7 +3008,7 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     return dX;
@@ -3081,7 +3081,7 @@ torch::Tensor silu_fwd_metal(torch::Tensor X) {
         }
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     return Y;
@@ -3148,7 +3148,7 @@ torch::Tensor silu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     return dX;
@@ -3424,7 +3424,7 @@ torch::Tensor solve_metal(torch::Tensor A, torch::Tensor b) {
         [encoder dispatchThreadgroups:MTLSizeMake(batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
         [encoder endEncoding];
-        stream->synchronize(SyncType::COMMIT_AND_WAIT);
+        stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
     // Reshape output to match input shape
