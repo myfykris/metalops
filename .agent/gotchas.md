@@ -32,10 +32,24 @@ Key scripts in this repo:
 
 ## Command Buffer Integration (HuggingFace/Transformers)
 - **Problem**: metalcore ops in HuggingFace model forward passes crash with "command encoder already encoding"
-- **Root Cause**: `COMMIT_AND_WAIT` forces full GPU sync, conflicts with PyTorch's active encoder
-- **Fix**: Use `SyncType::COMMIT` for forward-pass ops (GELU, SiLU, RMSNorm, LayerNorm, EmbeddingBag, Softmax)
-- **Keep COMMIT_AND_WAIT**: For standalone ops that need immediate results (SVD, QR, EIGH, Cholesky, Solve)
-- **AdamW**: Runs in optimizer.step() (after backward), no conflict - can use `COMMIT_AND_WAIT`
+- **Root Cause**: Creating encoder via `[cmdBuffer computeCommandEncoder]` conflicts with PyTorch's active encoder
+- **Correct Pattern**:
+  ```cpp
+  auto stream = at::mps::getCurrentMPSStream();
+  auto encoder = stream->commandEncoder();  // Returns existing or creates new
+  // ... encode your kernel ...
+  // DON'T call [encoder endEncoding] - PyTorch manages lifecycle
+  stream->synchronize(SyncType::NONE);  // Let PyTorch batch commands
+  ```
+- **Wrong Pattern** (causes crash):
+  ```cpp
+  auto encoder = [stream->commandBuffer() computeCommandEncoder];  // WRONG!
+  // ... encode ...
+  [encoder endEncoding];  // WRONG - ends PyTorch's encoder
+  stream->synchronize(SyncType::COMMIT_AND_WAIT);  // WRONG - blocks
+  ```
+- **Fixed ops**: rmsnorm_fwd, fused_add_rmsnorm, gelu_fwd, silu_fwd, fused_softmax, layernorm_fwd, embedding_bag
+- **Unchanged ops**: SVD, QR, Eigh, Cholesky, Solve, AdamW (standalone ops that need immediate results)
 
 ## Training Ops Gotchas
 - **Atomics in Backward**: SDPA backward uses `atomic_fetch_add`, which is slower but thread-safe.
