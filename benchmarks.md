@@ -1,6 +1,6 @@
 # Metalops Benchmark Results
 
-*Generated: 2026-01-13 15:26:26*
+*Generated: 2026-01-13 16:12:01*
 
 **Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | 🔵 Close | ⚪ CPU wins | 🟠 CPU wins big (>3x)
 
@@ -214,12 +214,12 @@
 
 | Config | Shape | Metal | Torch | Ratio | Status | Error |
 |---|---|---|---|---|---|---|
-| Small (B=2, H=8, N=64, D=64) | B=2, H=8, N=64, D=64 fp32 | 233.0µs | 302.0µs | 0.77x | 🔵 | ✓ 7e-07 |
-| Small (B=2, H=8, N=64, D=64) (causal) | B=2, H=8, N=64, D=64 fp32 | 671.4µs | 286.6µs | 2.34x | ⚪ | ✓ 3e-06 |
-| Medium (B=2, H=8, N=256, D=64) | B=2, H=8, N=256, D=64 fp32 | 929.4µs | 394.6µs | 2.36x | ⚪ | ✗ 1e-01 |
-| Medium (B=2, H=8, N=256, D=64) (causal) | B=2, H=8, N=256, D=64 fp32 | 3.4ms | 406.7µs | 8.42x | 🟠 | ✓ 3e-06 |
-| Large (B=1, H=8, N=512, D=64) | B=1, H=8, N=512, D=64 fp32 | 1.7ms | 454.8µs | 3.71x | 🟠 | ✗ 4e-02 |
-| Large (B=1, H=8, N=512, D=64) (causal) | B=1, H=8, N=512, D=64 fp32 | 5.8ms | 479.1µs | 12.17x | 🟠 | ✓ 3e-06 |
+| Large (B=1, H=8, N=512, D=64) | B=1, H=8, N=512, D=64 fp32 | 1.6ms | 437.5µs | 3.70x | 🟠 | ✗ 2e-02 |
+| Large (B=1, H=8, N=512, D=64) (causal) | B=1, H=8, N=512, D=64 fp32 | 6.0ms | 475.5µs | 12.59x | 🟠 | ✓ 3e-06 |
+| Medium (B=2, H=8, N=256, D=64) | B=2, H=8, N=256, D=64 fp32 | 1.3ms | 459.3µs | 2.91x | ⚪ | ✗ 5e-02 |
+| Medium (B=2, H=8, N=256, D=64) (causal) | B=2, H=8, N=256, D=64 fp32 | 4.0ms | 383.1µs | 10.55x | 🟠 | ✓ 4e-06 |
+| Small (B=2, H=8, N=64, D=64) | B=2, H=8, N=64, D=64 fp32 | 594.4µs | 450.7µs | 1.32x | ⚪ | ✓ 7e-07 |
+| Small (B=2, H=8, N=64, D=64) (causal) | B=2, H=8, N=64, D=64 fp32 | 1.2ms | 317.8µs | 3.93x | 🟠 | ✓ 3e-06 |
 
 ## Usage Recommendations
 
