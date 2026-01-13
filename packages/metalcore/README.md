@@ -46,7 +46,8 @@ pip install metalcore
 ```python
 import metalcore
 
-# Automatically accelerate F.silu, F.gelu, F.embedding_bag, torch.linalg.svd/qr
+# Automatically accelerate F.silu, F.embedding_bag, torch.linalg.svd/qr
+# Also replaces torch.optim.AdamW -> MetalAdamW, torch.nn.RMSNorm -> MetalRMSNorm
 metalcore.enable_pytorch_overrides()
 
 # Works seamlessly with HuggingFace models

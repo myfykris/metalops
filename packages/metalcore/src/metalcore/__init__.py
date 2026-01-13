@@ -110,7 +110,7 @@ def is_slow_metal_sdpa_enabled():
     """Check if (slow) Metal SDPA is currently enabled."""
     return _sdpa_enabled
 
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 __all__ = [
     "trsm",
     "trsm_batched", 

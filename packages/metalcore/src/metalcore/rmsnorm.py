@@ -66,13 +66,31 @@ class RMSNormFunction(Function):
         return dx, dw, None
 
 class MetalRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, normalized_shape, eps=1e-6, elementwise_affine=True, device=None, dtype=None):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        if isinstance(normalized_shape, int):
+            self.normalized_shape = (normalized_shape,)
+            self.hidden_size = normalized_shape
+        else:
+            self.normalized_shape = tuple(normalized_shape)
+            self.hidden_size = self.normalized_shape[-1] # Assume last dim is hidden size for now
+            
         self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(self.hidden_size, device=device, dtype=dtype))
+        else:
+            self.register_parameter('weight', None)
 
     def forward(self, x):
-        return RMSNormFunction.apply(x, self.weight, self.eps)
+        if self.elementwise_affine:
+            return RMSNormFunction.apply(x, self.weight, self.eps)
+        else:
+            # If no weight, use a dummy ones weight or handle in Function?
+            # RMSNormFunction expects weight. Let's create a temporary ones tensor if needed or handle logic.
+            # Easier: pass ones.
+            return RMSNormFunction.apply(x, torch.ones(self.hidden_size, device=x.device, dtype=x.dtype), self.eps)
 
 
 def fused_add_rmsnorm(input, residual, weight, eps=1e-6):

@@ -2,6 +2,14 @@
 
 All notable changes to `metalcore` will be documented in this file.
 
+## [0.1.15] - 2026-01-13
+### Added
+- Expanded `enable_pytorch_overrides()` to include:
+  - `torch.optim.AdamW` -> `MetalAdamW` (2.4x)
+  - `torch.nn.RMSNorm` -> `MetalRMSNorm` (~1.5x)
+  - `F.softmax` -> `fused_softmax` (using new `softmax` arg)
+- Updated `usage.md` with comprehensive "When to Use" guidance.
+
 ## [0.1.14] - 2026-01-13
 
 ### Added

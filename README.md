@@ -82,19 +82,24 @@ metalcore.enable_pytorch_overrides()
 # 2. F.embedding_bag(mode='sum'): avoids CPU fallback (6x faster)
 # 3. torch.linalg.svd: For large matrices (>= 512x512)
 # 4. torch.linalg.qr: For batched inputs (dim >= 3)
+# 5. torch.optim.AdamW: Replaced by MetalAdamW (2.4x faster)
+# 6. torch.nn.RMSNorm: Replaced by MetalRMSNorm (1.5x faster)
+# 7. F.softmax: Parity/Slightly faster
+
+# Note: This affects new instantiations. Existing models may need manual patching.
 ```
 
 **Note**: `F.gelu` is *not* overridden as the native PyTorch MPS implementation is highly optimized.
 
-#### Advanced Acceleration
-Some optimizations require direct model patching due to PyTorch architecture:
+#### Advanced Acceleration (HuggingFace Transformers)
+Some optimizations for pre-loaded models (like `LlamaForCausalLM`) require direct patching because they often use custom layers (e.g., `LlamaRMSNorm`) instead of standard `torch.nn` modules.
 
 ```python
 from transformers import AutoModelForCausalLM
 model = AutoModelForCausalLM.from_pretrained("...", device_map="mps")
 
 # 1. Patch RMSNorm (~1.5x faster)
-# Replaces LlamaRMSNorm, Qwen2RMSNorm, etc. with MetalRMSNorm
+# Needed for HF models which define their own RMSNorm classes
 metalcore.patch_transformers_rmsnorm(model)
 
 # 2. Patch RoPE (3.4x faster)

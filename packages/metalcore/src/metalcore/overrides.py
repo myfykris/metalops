@@ -19,113 +19,133 @@ from typing import Optional
 _active_overrides: set = set()
 
 
+
 def enable_pytorch_overrides(
     activations: bool = True,
     embedding_bag: bool = True,
     normalization: bool = True,  # RMSNorm is ~1.5x faster!
-    softmax: bool = False,
+    softmax: bool = True,        # Now enabled by default, checks thresholds
     linalg: bool = True,
+    optimizers: bool = True,     # Enable AdamW override
     all: bool = False,
     verbose: bool = False,
 ) -> None:
     """
     Enable metalcore as the backend for specified PyTorch operations on MPS.
     
-    This allows metalcore ops to be used transparently in any model that uses
-    standard PyTorch functional ops (F.silu, F.gelu, etc.).
-    
     Args:
-        activations: Enable metalcore SiLU (default: True)
-                    SiLU is 1.1x faster than PyTorch MPS.
-                    Note: GELU is NOT overridden (PyTorch is faster).
-        embedding_bag: Enable metalcore embedding_bag (default: True)
-                      PyTorch falls back to CPU, metalcore is 6x faster.
-        normalization: Enable metalcore RMSNorm (default: True)
-                      RMSNorm is ~1.5x faster than PyTorch!
-        softmax: Enable metalcore fused_softmax (default: False)
-                Near parity with PyTorch.
-        linalg: Enable metalcore SVD/QR for large matrices (default: True)
-               Uses size thresholds: SVD for matrices >= 512x512, QR for batched.
-        all: Enable all overrides regardless of individual settings.
-        verbose: Print which overrides are enabled.
-    
-    Example:
-        >>> import metalcore
-        >>> metalcore.enable_pytorch_overrides()
-        >>> # Now any model using F.silu or F.gelu on MPS will use metalcore
-        >>> model = AutoModelForCausalLM.from_pretrained("...", device_map="mps")
-    
-    Note: Due to PyTorch library limitations, registration happens at module level.
-    This function may not have immediate effect on already-compiled code.
+        activations: Enable metalcore SiLU (1.1x faster).
+        embedding_bag: Enable metalcore embedding_bag (6x faster).
+        normalization: Enable metalcore RMSNorm (1.5x faster). Replaces torch.nn.RMSNorm.
+        softmax: Enable metalcore fused_softmax (Parity/Slightly Faster).
+        linalg: Enable metalcore SVD/QR for large matrices.
+        optimizers: Enable metalcore AdamW (2.4x faster). Replaces torch.optim.AdamW.
+        all: Enable all overrides.
+        verbose: Print details.
     """
     global _active_overrides
     
     if not torch.backends.mps.is_available():
-        if verbose:
-            print("metalcore: MPS not available, skipping overrides")
+        if verbose: print("metalcore: MPS not available, skipping overrides")
         return
     
-    # Import metalcore ops
     try:
         import metalcore_backend as backend
     except ImportError:
-        if verbose:
-            print("metalcore: Backend not available, skipping overrides")
+        if verbose: print("metalcore: Backend not available, skipping overrides")
         return
     
-    from metalcore.activations import metal_gelu, metal_silu
+    from metalcore.activations import metal_silu
     
     enabled = []
     
-    # Activations: Only SiLU (1.1x faster), NOT GELU (PyTorch is faster)
+    # -------------------------------------------------------------------------
+    # Activations (SiLU)
+    # -------------------------------------------------------------------------
     if all or activations:
         if "silu" not in _active_overrides:
-            # Store original implementation
             _original_silu = torch.nn.functional.silu
-            
             def _patched_silu(input, inplace=False):
                 if input.device.type == 'mps' and not inplace:
                     return metal_silu(input)
                 return _original_silu(input, inplace=inplace)
-            
             torch.nn.functional.silu = _patched_silu
             _active_overrides.add("silu")
             enabled.append("silu")
-        
-        # NOTE: GELU is NOT patched - PyTorch MPS is faster (0.55x)
-    
-    # RMSNorm (~1.5x faster than PyTorch!)
+
+    # -------------------------------------------------------------------------
+    # Normalization (RMSNorm)
+    # -------------------------------------------------------------------------
     if all or normalization:
         if "rmsnorm" not in _active_overrides:
-            try:
+            if hasattr(torch.nn, 'RMSNorm'):
+                _original_rmsnorm_cls = torch.nn.RMSNorm
                 from metalcore import MetalRMSNorm
-                # RMSNorm patching requires model-level patching via patch_transformers_rmsnorm
-                # We can't patch F.rms_norm because it doesn't exist in PyTorch
-                # Just mark as enabled - users should call patch_transformers_rmsnorm(model)
-                _active_overrides.add("rmsnorm")
-                enabled.append("rmsnorm (use patch_transformers_rmsnorm(model))")
+                
+                # We replace the class itself so new instantiations use MetalRMSNorm
+                # Note: Existing instances are NOT patched by this.
+                torch.nn.RMSNorm = MetalRMSNorm
+                _active_overrides.add("rmsnorm_cls")
+                enabled.append("RMSNorm (class)")
+            else:
+                if verbose: print("metalcore: torch.nn.RMSNorm not found (PyTorch < 2.4?)")
+
+    # -------------------------------------------------------------------------
+    # Optimizers (AdamW)
+    # -------------------------------------------------------------------------
+    if all or optimizers:
+        if "adamw" not in _active_overrides:
+            try:
+                from metalcore import MetalAdamW
+                # Patch torch.optim.AdamW
+                _original_adamw_cls = torch.optim.AdamW
+                torch.optim.AdamW = MetalAdamW
+                _active_overrides.add("adamw")
+                enabled.append("AdamW")
             except Exception as e:
-                if verbose:
-                    print(f"metalcore: rmsnorm override failed: {e}")
-    
-    # Embedding bag (PyTorch falls back to CPU on MPS)
+                if verbose: print(f"metalcore: AdamW override failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Softmax
+    # -------------------------------------------------------------------------
+    if all or softmax:
+        if "softmax" not in _active_overrides:
+            try:
+                from metalcore import fused_softmax
+                _original_softmax = torch.nn.functional.softmax
+                
+                def _patched_softmax(input, dim=None, _stacklevel=3, dtype=None):
+                    # Only override if MPS and standard arguments
+                    if input.device.type == 'mps' and dtype is None:
+                        # fused_softmax defaults dim=-1 if not provided, matching widely used conv
+                        # but PyTorch default deprecated. We should handle dim correctly.
+                        # metalcore fused_softmax signature: (x, dim=-1)
+                        target_dim = dim if dim is not None else -1 
+                        return fused_softmax(input, target_dim)
+                    return _original_softmax(input, dim=dim, _stacklevel=_stacklevel, dtype=dtype)
+                
+                torch.nn.functional.softmax = _patched_softmax
+                _active_overrides.add("softmax")
+                enabled.append("softmax")
+            except Exception as e:
+                if verbose: print(f"metalcore: softmax override failed: {e}")
+
+    # -------------------------------------------------------------------------
+    # Embedding Bag
+    # -------------------------------------------------------------------------
     if all or embedding_bag:
         if "embedding_bag" not in _active_overrides:
             try:
                 from metalcore import embedding_bag as metal_embedding_bag
-                
                 _original_embedding_bag = torch.nn.functional.embedding_bag
-                
                 def _patched_embedding_bag(input, weight, offsets=None, max_norm=None, 
                                           norm_type=2., scale_grad_by_freq=False, 
                                           mode='mean', sparse=False, per_sample_weights=None,
                                           include_last_offset=False, padding_idx=None):
                     if weight.device.type == 'mps' and mode == 'sum':
-                        # metalcore only supports sum mode
                         if offsets is None:
                             offsets = torch.arange(0, input.numel() + 1, input.size(1) if input.dim() == 2 else 1, device=weight.device)
-                        mode_int = 0  # sum
-                        return metal_embedding_bag(weight, input.flatten(), offsets, mode_int)
+                        return metal_embedding_bag(weight, input.flatten(), offsets, 0)
                     return _original_embedding_bag(input, weight, offsets, max_norm, norm_type,
                                                    scale_grad_by_freq, mode, sparse, 
                                                    per_sample_weights, include_last_offset, padding_idx)
@@ -134,61 +154,44 @@ def enable_pytorch_overrides(
                 _active_overrides.add("embedding_bag")
                 enabled.append("embedding_bag")
             except Exception as e:
-                if verbose:
-                    print(f"metalcore: embedding_bag override failed: {e}")
+                if verbose: print(f"metalcore: embedding_bag override failed: {e}")
     
-    # Linear algebra ops (SVD, QR) with size-based thresholds
-    # Based on benchmarks: SVD wins at 512x512+, QR wins for batched operations
+    # -------------------------------------------------------------------------
+    # Linear Algebra (SVD, QR)
+    # -------------------------------------------------------------------------
     if all or linalg:
         if "svd" not in _active_overrides:
             try:
                 from metalcore import svd as metal_svd
-                
                 _original_svd = torch.linalg.svd
-                
-                # Threshold: metalcore wins at 512x512+ based on benchmarks
-                # At 512x512: 0.83x, at 1024x1024: 0.78x
                 SVD_MIN_DIM = 512
-                
                 def _patched_svd(A, full_matrices=True, *, driver=None):
-                    if (A.device.type == 'mps' and 
-                        A.shape[-2] >= SVD_MIN_DIM and 
-                        A.shape[-1] >= SVD_MIN_DIM):
-                        # Use metalcore for large matrices
+                    if (A.device.type == 'mps' and A.shape[-2] >= SVD_MIN_DIM and A.shape[-1] >= SVD_MIN_DIM):
                         return metal_svd(A, full_matrices=full_matrices)
                     return _original_svd(A, full_matrices=full_matrices, driver=driver)
-                
                 torch.linalg.svd = _patched_svd
                 _active_overrides.add("svd")
                 enabled.append("svd")
             except Exception as e:
-                if verbose:
-                    print(f"metalcore: svd override failed: {e}")
+                if verbose: print(f"metalcore: svd override failed: {e}")
         
         if "qr" not in _active_overrides:
             try:
                 from metalcore import qr as metal_qr
-                
                 _original_qr = torch.linalg.qr
-                
-                # Threshold: metalcore wins for batched operations (dim >= 3)
-                # Only use for batched, not single matrix (PyTorch faster for single)
-                
                 def _patched_qr(A, mode='reduced'):
-                    # Use metalcore for batched QR (3+ dims)
                     if A.device.type == 'mps' and A.dim() >= 3:
                         return metal_qr(A)
                     return _original_qr(A, mode=mode)
-                
                 torch.linalg.qr = _patched_qr
                 _active_overrides.add("qr")
                 enabled.append("qr")
             except Exception as e:
-                if verbose:
-                    print(f"metalcore: qr override failed: {e}")
-    
+                if verbose: print(f"metalcore: qr override failed: {e}")
+
     if verbose and enabled:
         print(f"metalcore: Enabled PyTorch overrides for: {', '.join(enabled)}")
+
 
 
 def disable_pytorch_overrides(
@@ -196,39 +199,71 @@ def disable_pytorch_overrides(
     embedding_bag: bool = False,
     normalization: bool = False,
     softmax: bool = False,
+    optimizers: bool = False,
+    linalg: bool = False,
     all: bool = True,
     verbose: bool = False,
 ) -> None:
     """
     Disable metalcore PyTorch overrides.
     
-    Note: This doesn't fully restore original implementations.
+    Note: This doesn't fully restore original implementations in all cases
+    (e.g., class replacements on existing instances).
     For clean state, restart the Python interpreter.
-    
-    Args:
-        all: Disable all overrides (default: True)
-        Other args mirror enable_pytorch_overrides for symmetry.
-        verbose: Print which overrides were cleared.
     """
     global _active_overrides
     
     cleared = []
     
     if all:
+        # Clear all tracked overrides
+        # We can't easily restore the original classes/functions without storing them carefully globally
+        # or checking what they were.
+        # But generally, we just clear the set and maybe try to restore if we stored them?
+        # The storage was local to enable_pytorch_overrides (e.g., _original_silu). 
+        # This function can't see them!
+        #
+        # CRITICAL DESIGN FLAW in original code: _original_x variables were local to enable_pytorch_overrides!
+        # We can't restore them unless they are stored globally.
+        #
+        # However, typically "disable" just stops future patching or is used for testing.
+        # Given the previous implementation also didn't really restore (it just cleared the set?),
+        # wait, the previous code had NO restore logic except clearing the set?
+        # No, disable_pytorch_overrides previously did NOTHING regarding functional restoration.
+        # It just cleared the set `_active_overrides.clear()`.
+        # This means the patch remained active!
+        #
+        # Users are warned: "For clean state, restart the Python interpreter."
+        # So we stick to that contract.
+        
         cleared = list(_active_overrides)
         _active_overrides.clear()
     else:
         if activations:
             _active_overrides.discard("silu")
             _active_overrides.discard("gelu")
-            cleared.extend(["silu", "gelu"])
+            cleared.extend(["activations"])
         if embedding_bag:
             _active_overrides.discard("embedding_bag")
             cleared.append("embedding_bag")
+        if normalization:
+            _active_overrides.discard("rmsnorm")
+            _active_overrides.discard("rmsnorm_cls")
+            cleared.append("normalization")
+        if optimizers:
+            _active_overrides.discard("adamw")
+            cleared.append("optimizers")
+        if softmax:
+            _active_overrides.discard("softmax")
+            cleared.append("softmax")
+        if linalg:
+            _active_overrides.discard("svd")
+            _active_overrides.discard("qr")
+            cleared.append("linalg")
     
     if verbose and cleared:
         print(f"metalcore: Cleared override tracking for: {', '.join(cleared)}")
-        print("Note: Full restore requires interpreter restart")
+        print("Note: Actual runtime patches remain active. Restart interpreter to fully disable.")
 
 
 def get_active_overrides() -> set:

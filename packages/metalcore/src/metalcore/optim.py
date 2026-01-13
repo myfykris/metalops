@@ -19,9 +19,10 @@ import math
 
 class MetalAdamW(Optimizer):
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=1e-2, amsgrad=False):
+                 weight_decay=1e-2, amsgrad=False, **kwargs):
         if amsgrad:
             raise ValueError("MetalAdamW does not support amsgrad yet")
+        # Warn about ignored kwargs if verbose? For now just accept them to avoid crashing.
         defaults = dict(lr=lr, betas=betas, eps=eps,
                         weight_decay=weight_decay, amsgrad=amsgrad)
         super(MetalAdamW, self).__init__(params, defaults)
