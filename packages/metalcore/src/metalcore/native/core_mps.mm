@@ -4158,7 +4158,7 @@ torch::Tensor softmax_bwd_metal(torch::Tensor probs, torch::Tensor d_probs) {
         
         [encoder setThreadgroupMemoryLength:sharedMemSize atIndex:0];
         [encoder dispatchThreadgroups:gridSize threadsPerThreadgroup:threadgroupSize];
-        [encoder endEncoding];
+
         
         stream->synchronize(SyncType::NONE);
     }
@@ -5340,6 +5340,7 @@ torch::Tensor gather_metal(torch::Tensor src, torch::Tensor index, int64_t dim_)
             [encoder dispatchThreads:MTLSizeMake(n, 1, 1)
                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             
+            [encoder endEncoding];
             torch::mps::synchronize();
         }
         
