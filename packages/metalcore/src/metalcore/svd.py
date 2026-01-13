@@ -1,6 +1,11 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
+"""
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
+Computes the Singular Value Decomposition (SVD) of a batch of matrices using Metal acceleration.
+Supports both standard Jacobi algorithm and Hybrid Gram strategy for large/tall matrices.
+"""
 import torch
 import metalcore_backend as mc
 from . import config

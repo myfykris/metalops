@@ -3820,7 +3820,7 @@ kernel void kl_div_topk_fwd_bfloat(
     float row_sum = 0.0f;
     
     // Stride loop over K
-    for (uint i = lane; i < k; i += 256) {
+    for (uint i = lane; i < (uint)k; i += 256) {
         int idx_k = row * k + i;
         int token_idx = topk_indices[idx_k];
         int flat_idx = row * vocab_size + token_idx;

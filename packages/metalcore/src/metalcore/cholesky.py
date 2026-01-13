@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 Cholesky Decomposition and Solve
 
 Cholesky decomposition for symmetric positive-definite matrices: A = L @ L.T

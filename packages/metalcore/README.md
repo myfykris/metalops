@@ -22,7 +22,7 @@ pip install metalcore
 - **Solve**: LU-based, 10x faster batched (fp16/bf16 supported)
 
 ### Training Ops
-- **RMSNorm** (`MetalRMSNorm`): **675x faster** than PyTorch!
+- **RMSNorm** (`MetalRMSNorm`): **~1.5x faster** than PyTorch
 - **AdamW** (`MetalAdamW`): 2.4x faster optimizer
 - **SiLU** (`metal_silu`): 1.1x faster
 - **EmbeddingBag**: 6x faster (avoids CPU fallback)
@@ -96,13 +96,15 @@ y = metal_gelu(x)
 
 | Operation | Speedup |
 |-----------|---------|
-| RMSNorm | **675x** |
+| RMSNorm | **~1.5x** |
 | EmbeddingBag | **6x** (vs CPU fallback) |
 | AdamW | **2.4x** |
 | RoPE | **3.4x** |
 | SiLU | **1.1x** |
 | QR Batched | up to **20x** |
 | SVD (large) | up to **12x** |
+| Fused MLP Bwd | **5-6x** (vs Autograd) |
+| Fused Attn Bwd | **Parity** with FP16 |
 
 ## Requirements
 

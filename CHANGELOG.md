@@ -34,7 +34,7 @@ All notable changes to `metalcore` will be documented in this file.
   - SiLU: 1.1x faster → patched ✓
   - GELU: 0.55x (slower) → NOT patched
   - EmbeddingBag: 6x faster → patched ✓
-  - RMSNorm: 675x faster → enabled via `patch_transformers_rmsnorm(model)`
+  - RMSNorm: ~1.5x faster → enabled via `patch_transformers_rmsnorm(model)`
   - `normalization=True` now default in `enable_pytorch_overrides()`
 
 ## [0.1.13] - 2026-01-07

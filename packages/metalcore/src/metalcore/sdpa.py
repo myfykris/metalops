@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 Metal-accelerated Scaled Dot Product Attention (SDPA).
 
 Supports:

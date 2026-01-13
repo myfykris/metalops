@@ -1,6 +1,11 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
+"""
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
+Metal-accelerated RMSNorm (Root Mean Square Layer Normalization).
+Provides significantly faster forward and backward passes compared to PyTorch native.
+"""
 
 import torch
 import torch.nn as nn

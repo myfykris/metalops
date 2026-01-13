@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 Pseudo-Inverse using SVD
 
 Computes the Moore-Penrose pseudo-inverse: A⁺ = V @ diag(1/S) @ U.T

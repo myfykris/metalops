@@ -21,7 +21,7 @@ MIT
 | **Eigh** | Symmetric Eigendecomposition | Up to **3.5x faster** for batched matrices |
 | **Cholesky** | Cholesky Decomposition | **33x faster** for batched operations |
 | **Solve** | Linear System Solver (LU-based) | **10x faster** for batched systems (fp16/bf16 supported) |
-| **RMSNorm** | Fused RMS Normalization | **675x faster** than PyTorch |
+| **RMSNorm** | Fused RMS Normalization | **~1.5x faster** than PyTorch |
 | **AdamW** | Fused Optimizer Step | **2.4x faster** than torch.optim.AdamW |
 | **SiLU** | Vectorized Activations | **1.1x faster** |
 | **EmbeddingBag** | Optimized Embedding Sum | **6x faster** (PyTorch falls back to CPU) |
@@ -93,7 +93,7 @@ Some optimizations require direct model patching due to PyTorch architecture:
 from transformers import AutoModelForCausalLM
 model = AutoModelForCausalLM.from_pretrained("...", device_map="mps")
 
-# 1. Patch RMSNorm (675x faster)
+# 1. Patch RMSNorm (~1.5x faster)
 # Replaces LlamaRMSNorm, Qwen2RMSNorm, etc. with MetalRMSNorm
 metalcore.patch_transformers_rmsnorm(model)
 
@@ -111,7 +111,7 @@ See **[usage.md](usage.md)** for comprehensive documentation and example workflo
 See **[benchmarks.md](benchmarks.md)** for detailed benchmark results.
 
 ### Key Speedups
-- **RMSNorm**: 675x faster (vectorized SIMD reductions)
+- **RMSNorm**: ~1.5x faster (vectorized SIMD reductions)
 - **AdamW**: 2.4x faster (fused single-kernel update)
 - **RoPE**: 3.4x faster (Metal-accelerated)
 - **EmbeddingBag**: 6x faster (GPU vs CPU fallback)

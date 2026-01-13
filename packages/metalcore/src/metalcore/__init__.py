@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 metalcore: Foundational Metal Linear Algebra Primitives
 
 This package provides GPU-accelerated building blocks for linear algebra:

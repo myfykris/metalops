@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 PyTorch custom op registration for metalcore.
 
 This module provides transparent acceleration of PyTorch operations by
@@ -21,7 +22,7 @@ _active_overrides: set = set()
 def enable_pytorch_overrides(
     activations: bool = True,
     embedding_bag: bool = True,
-    normalization: bool = True,  # RMSNorm is 675x faster!
+    normalization: bool = True,  # RMSNorm is ~1.5x faster!
     softmax: bool = False,
     linalg: bool = True,
     all: bool = False,
@@ -40,7 +41,7 @@ def enable_pytorch_overrides(
         embedding_bag: Enable metalcore embedding_bag (default: True)
                       PyTorch falls back to CPU, metalcore is 6x faster.
         normalization: Enable metalcore RMSNorm (default: True)
-                      RMSNorm is 675x faster than PyTorch!
+                      RMSNorm is ~1.5x faster than PyTorch!
         softmax: Enable metalcore fused_softmax (default: False)
                 Near parity with PyTorch.
         linalg: Enable metalcore SVD/QR for large matrices (default: True)
@@ -93,7 +94,7 @@ def enable_pytorch_overrides(
         
         # NOTE: GELU is NOT patched - PyTorch MPS is faster (0.55x)
     
-    # RMSNorm (675x faster than PyTorch!)
+    # RMSNorm (~1.5x faster than PyTorch!)
     if all or normalization:
         if "rmsnorm" not in _active_overrides:
             try:

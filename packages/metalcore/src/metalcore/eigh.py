@@ -1,6 +1,10 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
+"""
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
+Computes eigenvalues and eigenvectors of a real symmetric matrix A.
+"""
 import torch
 from . import config
 

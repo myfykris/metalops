@@ -56,7 +56,7 @@ X = metalcore.solve(A, B)
 ## Training Operations
 
 ### Fused RMSNorm
-A highly optimized RMSNorm implementation that fuses sum-of-squares reduction and normalization. **675x faster** than PyTorch naive implementation.
+A highly optimized RMSNorm implementation that fuses sum-of-squares reduction and normalization. **~1.5x faster** than PyTorch naive implementation.
 
 ```python
 from metalcore import MetalRMSNorm

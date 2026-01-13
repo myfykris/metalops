@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 QR Decomposition using Blocked Householder Algorithm.
 
 Based on ROCm/rocSOLVER patterns:

@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 Least Squares Solver using QR + TRSM
 
 Solves the least squares problem: min_x ||Ax - b||²

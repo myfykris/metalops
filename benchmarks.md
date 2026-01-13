@@ -1,6 +1,6 @@
 # Metalops Benchmark Results
 
-*Generated: 2026-01-13 16:12:01*
+*Generated: 2026-01-13 16:32:13*
 
 **Legend:** 💚 GPU wins big (>3x) | 🟢 GPU wins | 🔵 Close | ⚪ CPU wins | 🟠 CPU wins big (>3x)
 
@@ -46,10 +46,10 @@
 
 | Shape | Config | Metal | CPU | Ratio | Status |
 |---|---|---|---|---|---|
-| 32x4096 | Fwd+Bwd fp32 | 465.1µs | 506.7µs | 0.92x | 🔵 |
-| 1x4096 | Fwd+Bwd fp32 | 424.3µs | 449.5µs | 0.94x | 🔵 |
-| 1024x1024 | Fwd+Bwd fp32 | 792.6µs | 909.2µs | 0.87x | 🔵 |
-| 4096x4096 | Fwd+Bwd fp32 | 5.9ms | 8.6ms | 0.69x | 🟢 |
+| 1024x1024 | Fwd+Bwd fp32 | 860.0µs | 930.4µs | 0.92x | 🔵 |
+| 1x4096 | Fwd+Bwd fp32 | 311.3µs | 442.1µs | 0.70x | 🔵 |
+| 32x4096 | Fwd+Bwd fp32 | 365.7µs | 504.1µs | 0.73x | 🔵 |
+| 4096x4096 | Fwd+Bwd fp32 | 5.7ms | 8.7ms | 0.66x | 🟢 |
 
 ## AdamW (metalcore) ⭐ GPU WINS
 

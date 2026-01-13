@@ -1,6 +1,11 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
+"""
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
+Metal-accelerated AdamW Optimizer.
+Implements a fused step for significantly faster parameter updates.
+"""
 
 import torch
 from torch.optim import Optimizer

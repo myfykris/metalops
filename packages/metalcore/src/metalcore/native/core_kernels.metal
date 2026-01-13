@@ -16,8 +16,7 @@ using namespace metal;
 // Maximum panel dimensions for shared memory caching
 // Adjust based on GPU shared memory limits (32KB typical)
 
-constant uint MAX_PANEL_M = 512;
-constant uint MAX_PANEL_N = 32;
+
 
 // ============================================================================
 // SIMD Helper Functions
@@ -2036,7 +2035,7 @@ kernel void column_norms_kernel(
 // 4. Parallel column updates below diagonal
 
 // Maximum matrix size for shared memory (32KB / 4 bytes = 8192 floats, sqrt = ~90)
-constant uint CHOL_MAX_N = 64;
+// constant uint CHOL_MAX_N = 64;
 
 kernel void cholesky_batched_kernel(
     device float* A [[buffer(0)]],           // (batch, N, N) input/output

@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 Metal-accelerated high-performance operations:
 - Fused Softmax (online algorithm)
 - LayerNorm (Welford's algorithm)

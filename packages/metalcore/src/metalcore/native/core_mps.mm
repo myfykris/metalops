@@ -6345,15 +6345,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     int64_t D_inter = W_gate.size(0); // [D_inter, D]
     
     bool has_lora_gate = A_gate.numel() > 0;
-    bool has_lora_down = A_down.numel() > 0; // Assuming if gate has, up has too for simplicity, but explicit is better
+
     
     auto h = hidden_states.contiguous().view({B * L, D});
     auto W_g_c = W_gate.contiguous();
     auto W_u_c = W_up.contiguous();
     auto W_d_c = W_down.contiguous();
     
-    bool is_half = h.scalar_type() == at::kHalf;
-    bool is_bfloat = h.scalar_type() == at::kBFloat16;
+
     
     // Allocate intermediate buffers
     auto normed = torch::empty({B * L, D}, h.options());
@@ -6370,8 +6369,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     // =========================================================================
     @autoreleasepool {
         MPSStream* stream = getCurrentMPSStream();
-        id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
-        id<MTLDevice> device = stream->device();
+
         
         // --- RMSNorm (ATen) ---
         // Using ATen ensures correctness and avoids any kernel dispatch issues

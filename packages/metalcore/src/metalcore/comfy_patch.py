@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 ComfyUI Metal Patch
 
 Monkeypatches key PyTorch functions to use Metal-accelerated implementations.

@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 RoPE (Rotary Position Embedding) - Metal-accelerated implementation
 
 Matches HuggingFace/Liger implementation using split-half format:

@@ -1513,7 +1513,7 @@ inline void dequant_int4_vec16(
     // Precompute constants
     const half md = -zero * scale;  // offset term
     const ushort mask_lo = 0x000F;
-    const ushort mask_hi = 0x00F0;
+
     
     // Unpack and dequantize 16 values into 4x4 matrix
     FOR_UNROLL (short i = 0; i < 4; i++) {
@@ -1610,7 +1610,7 @@ kernel void matmul_int4_llama(
             const short iy = 8 * il1;  // K offset within tile
             
             if (gn < N && k_base + iy < K) {
-                device const half* y_src = X;  // temporary, we'll load from W
+                // device const half* y_src = X;  // temporary, we'll load from W
                 
                 // Load 8 halfs worth of W data
                 FOR_UNROLL (short i = 0; i < 8; i++) {
@@ -1766,7 +1766,7 @@ kernel void matmul_ggml_q4_0(
     const short il0 = tiitg % 2;
     
     // Number of blocks per column
-    const uint num_blocks_k = K / GGML_QK4_0;
+    // const uint num_blocks_k = K / GGML_QK4_0;
     
     // Accumulators
     simdgroup_half8x8 ma[4];

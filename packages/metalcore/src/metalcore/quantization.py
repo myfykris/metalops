@@ -1,7 +1,8 @@
-# Author: Kris Bailey
-# Copyright 2026
-# Email: kris@krisbailey.com
 """
+Author: Kris Bailey
+Copyright 2026
+Email: kris@krisbailey.com
+
 Quantized Operations - INT8/INT4 quantization for memory-efficient LLM inference
 
 Enables running larger models on Apple Silicon by storing weights in low-precision:
