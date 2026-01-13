@@ -1,6 +1,6 @@
 # MetalOps
 
-**MetalOps** is a collection of high-performance Metal-accelerated linear algebra and training operations for PyTorch on macOS (Apple Silicon).  This repo is meant as a starting point to get Apple Silicon acceleration in a better place, so feel free to send through PRs if you have fixes, or report issues!
+**MetalOps** is a collection of high-performance Metal-accelerated linear algebra and training operations for PyTorch on macOS (Apple Silicon). This repo is meant as a starting point to get Apple Silicon acceleration in a better place, so feel free to send through PRs if you have fixes, or report issues!
 
 All operations are consolidated into the single **`metalcore`** package.
 

@@ -28,7 +28,8 @@ pip install metalcore
 - **EmbeddingBag**: 6x faster (avoids CPU fallback)
 - **LayerNorm**, **Softmax**: Fused implementations
 
-### RoPE (NEW in v0.1.14)
+### RoPE
+
 - **`apply_rotary_pos_emb`**: Metal-accelerated rotary embeddings (3.4x faster)
 - **`RotaryEmbedding`**: Drop-in HuggingFace replacement module
 - **`patch_transformers_rope`**: Auto-patches Llama/Mistral/Qwen models

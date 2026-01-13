@@ -6389,8 +6389,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
              float min_v = normed.min().item<float>();
              float max_v = normed.max().item<float>();
              bool is_nan = std::isnan(min_v) || std::isnan(max_v);
-             if (0) printf("DEBUG: Normed min=%f, max=%f, NaN=%d\n", min_v, max_v, is_nan);
-             fflush(stdout);
+
         }
         
         // --- Gate/Up Matmuls ---
@@ -6404,11 +6403,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
              float min_g = gate_out.min().item<float>();
              float max_g = gate_out.max().item<float>();
              bool is_nan = std::isnan(min_g) || std::isnan(max_g);
-             if (0) printf("DEBUG: Gate sizes=[%lld, %lld], strides=[%lld, %lld], contiguous=%d\n", 
-                    gate_out.size(0), gate_out.size(1), 
-                    gate_out.stride(0), gate_out.stride(1), gate_out.is_contiguous());
-             if (0) printf("DEBUG: Gate min=%f, max=%f, NaN=%d\n", min_g, max_g, is_nan);
-             fflush(stdout);
+
         }
 
         if (has_lora_gate) {

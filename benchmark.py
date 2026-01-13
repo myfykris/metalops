@@ -2386,6 +2386,8 @@ def benchmark_fused_swiglu_mlp():
                     )
 
                 out_m = run_metal()
+                if isinstance(out_m, tuple):
+                    out_m = out_m[0]
                 out_t = run_torch()
                 
                 if device == 'mps': torch.mps.synchronize()
