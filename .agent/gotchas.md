@@ -160,4 +160,9 @@ These are NOT half-implemented features, just cruft:
       uint idx = row * stride_row + col * stride_col;
       ```
 - **Const Aliasing**: Never declare a buffer as `device const T*` if you are writing to it in-place (aliasing input as output). The compiler may cache reads assuming immutability, leading to race conditions.
-- **MPS Buffer Assertions**: Using manual `MPSMatrixMultiplication` with mixed types (FP16 input, FP32 accum) is fragile. If you hit obscure "buffer size" assertions, switch to `at::mm`.
+
+## Troubleshooting
+### Crash: "failed assertion 'A command encoder is already encoding to this command buffer'"
+- **Cause**: A custom Metal kernel created a raw encoder (`[cmdBuf computeCommandEncoder]`) on a command buffer that PyTorch was already using.
+- **Fix**: Use `stream->commandEncoder()` instead. This method is aware of PyTorch's state and will either return the active encoder or safely create a new one. **NEVER** call `[encoder endEncoding]` when using this method.
+- **Affected Kernels**: Historically `adamw`, `rmsnorm`, `sdpa`, `cholesky`, `solve`. Ensure these are patched to use `stream->commandEncoder()`.

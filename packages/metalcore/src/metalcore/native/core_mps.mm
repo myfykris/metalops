@@ -1860,8 +1860,8 @@ torch::Tensor trsm_batched_metal(torch::Tensor R, torch::Tensor B) {
     // General kernel for other sizes
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.trsmBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(R) offset:R.storage_offset() * R.element_size() atIndex:0];
@@ -1882,7 +1882,7 @@ torch::Tensor trsm_batched_metal(torch::Tensor R, torch::Tensor B) {
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -1933,7 +1933,7 @@ torch::Tensor solve_batched_metal(torch::Tensor A, torch::Tensor b) {
         
         // === Phase 1: Batched QR ===
         {
-            id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             
             [encoder setComputePipelineState:kernels.qrBatchedPSO];
             [encoder setBuffer:getMTLBufferStorage(A_contig) offset:A_contig.storage_offset() * A_contig.element_size() atIndex:0];
@@ -1953,12 +1953,12 @@ torch::Tensor solve_batched_metal(torch::Tensor A, torch::Tensor b) {
             [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             
-            [encoder endEncoding];
+            // [encoder endEncoding];
         }
         
         // === Phase 2: c = Q.T @ b (use custom Metal kernel - no sync needed!) ===
         if (kernels.batchedQtBPSO) {
-            id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             
             [encoder setComputePipelineState:kernels.batchedQtBPSO];
             [encoder setBuffer:getMTLBufferStorage(Q) offset:0 atIndex:0];
@@ -1976,7 +1976,7 @@ torch::Tensor solve_batched_metal(torch::Tensor A, torch::Tensor b) {
             [encoder dispatchThreads:MTLSizeMake(K, N, Batch) 
                 threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
             
-            [encoder endEncoding];
+            // [encoder endEncoding];
         } else {
             // Fallback to torch::bmm (requires sync)
             stream->synchronize(SyncType::COMMIT_AND_WAIT);
@@ -1987,7 +1987,7 @@ torch::Tensor solve_batched_metal(torch::Tensor A, torch::Tensor b) {
         // === Phase 3: Batched TRSM ===
         {
             c = c.contiguous();
-            id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             
             [encoder setComputePipelineState:kernels.trsmBatchedPSO];
             [encoder setBuffer:getMTLBufferStorage(R) offset:0 atIndex:0];
@@ -2007,7 +2007,7 @@ torch::Tensor solve_batched_metal(torch::Tensor A, torch::Tensor b) {
             [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             
-            [encoder endEncoding];
+            // [encoder endEncoding];
         }
         
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
@@ -2045,8 +2045,8 @@ std::tuple<torch::Tensor, torch::Tensor> column_norm_sort_metal(torch::Tensor A)
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.columnNormSortPSO];
         [encoder setBuffer:getMTLBufferStorage(A_contig) offset:A_contig.storage_offset() * A_contig.element_size() atIndex:0];
@@ -2067,7 +2067,7 @@ std::tuple<torch::Tensor, torch::Tensor> column_norm_sort_metal(torch::Tensor A)
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2100,8 +2100,8 @@ void sign_canonicalize_metal(torch::Tensor U, torch::Tensor V) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.signCanonicalizePSO];
         [encoder setBuffer:getMTLBufferStorage(U) offset:U.storage_offset() * U.element_size() atIndex:0];
@@ -2117,7 +2117,7 @@ void sign_canonicalize_metal(torch::Tensor U, torch::Tensor V) {
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
 }
@@ -2150,8 +2150,8 @@ torch::Tensor batched_qt_b_metal(torch::Tensor Q, torch::Tensor b) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.batchedQtBPSO];
         [encoder setBuffer:getMTLBufferStorage(Q_contig) offset:Q_contig.storage_offset() * Q_contig.element_size() atIndex:0];
@@ -2171,7 +2171,7 @@ torch::Tensor batched_qt_b_metal(torch::Tensor Q, torch::Tensor b) {
         [encoder dispatchThreads:MTLSizeMake(K, N, Batch) 
             threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2202,8 +2202,8 @@ std::tuple<torch::Tensor, torch::Tensor> lu_batched_metal(torch::Tensor A) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.luBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(LU) offset:0 atIndex:0];
@@ -2217,7 +2217,7 @@ std::tuple<torch::Tensor, torch::Tensor> lu_batched_metal(torch::Tensor A) {
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2248,8 +2248,8 @@ torch::Tensor syrk_batched_metal(torch::Tensor A) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.syrkBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(A_contig) offset:A_contig.storage_offset() * A_contig.element_size() atIndex:0];
@@ -2265,7 +2265,7 @@ torch::Tensor syrk_batched_metal(torch::Tensor A) {
         [encoder dispatchThreads:MTLSizeMake(N, N, Batch) 
             threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2296,8 +2296,8 @@ torch::Tensor frobenius_norm_batched_metal(torch::Tensor A) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.frobeniusNormBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(A_contig) offset:A_contig.storage_offset() * A_contig.element_size() atIndex:0];
@@ -2316,7 +2316,7 @@ torch::Tensor frobenius_norm_batched_metal(torch::Tensor A) {
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2345,8 +2345,8 @@ torch::Tensor softmax_batched_metal(torch::Tensor x, float temperature) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.softmaxBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(out) offset:0 atIndex:0];
@@ -2363,7 +2363,7 @@ torch::Tensor softmax_batched_metal(torch::Tensor x, float temperature) {
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2394,8 +2394,8 @@ torch::Tensor trace_batched_metal(torch::Tensor A) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.traceBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(A_contig) offset:A_contig.storage_offset() * A_contig.element_size() atIndex:0];
@@ -2412,7 +2412,7 @@ torch::Tensor trace_batched_metal(torch::Tensor A) {
         [encoder dispatchThreadgroups:MTLSizeMake(Batch, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -2442,8 +2442,8 @@ torch::Tensor column_norms_metal(torch::Tensor A) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.columnNormsPSO];
         [encoder setBuffer:getMTLBufferStorage(A) offset:A.storage_offset() * A.element_size() atIndex:0];
@@ -2462,7 +2462,7 @@ torch::Tensor column_norms_metal(torch::Tensor A) {
         [encoder dispatchThreadgroups:MTLSizeMake(N, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -3318,7 +3318,7 @@ void adamw_step_metal(
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         // For half/bfloat: params are 2 bytes, but exp_avg/exp_avg_sq are 4 bytes
         int64_t state_elem_size = 4;  // exp_avg and exp_avg_sq are always float32
@@ -3401,7 +3401,7 @@ void adamw_step_metal(
             printf("metalcore: Warning - No scalar AdamW kernel for dtype, tail %lld elements ignored!\n", tail);
         }
         
-        [encoder endEncoding];
+        // [encoder endEncoding]; // Handled by PyTorch stream
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
 }
@@ -3435,8 +3435,8 @@ torch::Tensor cholesky_batched_metal(torch::Tensor A) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.choleskyBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(L) offset:L.storage_offset() * L.element_size() atIndex:0];
@@ -3455,7 +3455,7 @@ torch::Tensor cholesky_batched_metal(torch::Tensor A) {
         [encoder dispatchThreadgroups:MTLSizeMake(batch_size, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -3497,8 +3497,8 @@ torch::Tensor cholesky_solve_batched_metal(torch::Tensor L, torch::Tensor b) {
     // The kernel accesses L[j,i] directly for L.T[i,j] - no memory copy needed
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto cmdBuffer = stream->commandBuffer();
-        auto encoder = [cmdBuffer computeCommandEncoder];
+        // auto cmdBuffer = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.choleskySolveBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(L) offset:L.storage_offset() * L.element_size() atIndex:0];
@@ -3518,7 +3518,7 @@ torch::Tensor cholesky_solve_batched_metal(torch::Tensor L, torch::Tensor b) {
         [encoder dispatchThreadgroups:MTLSizeMake(batch_size, 1, 1) 
             threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -3646,7 +3646,7 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
         stream->synchronize(SyncType::COMMIT);
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:getMTLBufferStorage(dY) offset:dY.storage_offset() * elem_size atIndex:0];
@@ -3660,7 +3660,7 @@ torch::Tensor gelu_bwd_metal(torch::Tensor dY, torch::Tensor X) {
         NSUInteger groups = (threads + tg_size - 1) / tg_size;
         [encoder dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
@@ -4028,8 +4028,8 @@ torch::Tensor kl_div_topk_fwd_metal(
         
         @autoreleasepool {
             MPSStream* stream = getCurrentMPSStream();
-            id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
-            id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+            // id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             
             [encoder setComputePipelineState:pso];
             [encoder setBuffer:getMTLBufferStorage(lp) offset:lp.storage_offset() * lp.element_size() atIndex:0];
@@ -4048,7 +4048,7 @@ torch::Tensor kl_div_topk_fwd_metal(
             MTLSize threadgroupSize = MTLSizeMake(MIN(batch_size, 256), 1, 1);
             
             [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
-            [encoder endEncoding];
+            // [encoder endEncoding];
             
             stream->synchronize(SyncType::NONE);
         }
@@ -4620,8 +4620,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fused_add_layernorm_meta
     
     @autoreleasepool {
         MPSStream* stream = getCurrentMPSStream();
-        id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
-        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        // id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:pso];
         [encoder setBuffer:getMTLBufferStorage(input) offset:input.storage_offset() * input.element_size() atIndex:0];
@@ -4641,7 +4641,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fused_add_layernorm_meta
         [encoder setThreadgroupMemoryLength:64 * sizeof(float) atIndex:0];
         [encoder dispatchThreadgroups:MTLSizeMake(batch, 1, 1) 
              threadsPerThreadgroup:MTLSizeMake(threadsPerGroup, 1, 1)];
-        [encoder endEncoding];
+        // [encoder endEncoding];
         
         stream->synchronize(SyncType::COMMIT);
     }
@@ -4676,8 +4676,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> quantize_to_int4_metal(
     
     @autoreleasepool {
         MPSStream* stream = getCurrentMPSStream();
-        id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
-        id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+        // id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.quantizeToInt4PSO];
         [encoder setBuffer:getMTLBufferStorage(weight) offset:weight.storage_offset() * weight.element_size() atIndex:0];
@@ -4696,7 +4696,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> quantize_to_int4_metal(
         MTLSize gridSize = MTLSizeMake(N, num_groups, 1);
         MTLSize threadgroupSize = MTLSizeMake(std::min((int64_t)64, N), 1, 1);
         [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadgroupSize];
-        [encoder endEncoding];
+        // [encoder endEncoding];
         
         stream->synchronize(SyncType::COMMIT);
     }
@@ -4827,7 +4827,7 @@ torch::Tensor sdpa_fwd_metal(torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
         stream->synchronize(SyncType::COMMIT);
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         if (use_flash) {
             // Flash Attention v2 - tiled, handles arbitrary sequence lengths
@@ -4904,7 +4904,7 @@ torch::Tensor sdpa_fwd_metal(torch::Tensor Q, torch::Tensor K, torch::Tensor V, 
             [encoder dispatchThreadgroups:MTLSizeMake(seq_len, batch_heads, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         }
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -4946,7 +4946,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sdpa_bwd_metal(
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
         stream->synchronize(SyncType::COMMIT);
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.flashAttentionBwdV2PSO];
         [encoder setBuffer:getMTLBufferStorage(Q) offset:Q.storage_offset() * 4 atIndex:0];
@@ -4972,7 +4972,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sdpa_bwd_metal(
         // Grid: (seq_len, batch_heads)
         [encoder dispatchThreadgroups:MTLSizeMake(seq_len, batch_heads, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
     
@@ -5039,7 +5039,7 @@ torch::Tensor solve_metal(torch::Tensor A, torch::Tensor b) {
     
     @autoreleasepool {
         auto stream = at::mps::getCurrentMPSStream();
-        auto encoder = [stream->commandBuffer() computeCommandEncoder];
+        id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
         
         [encoder setComputePipelineState:kernels.solveBatchedPSO];
         [encoder setBuffer:getMTLBufferStorage(A_work) offset:A_work.storage_offset() * 4 atIndex:0];
@@ -5056,7 +5056,7 @@ torch::Tensor solve_metal(torch::Tensor A, torch::Tensor b) {
         NSUInteger tg_size = std::min((NSUInteger)N, (NSUInteger)256);
         [encoder dispatchThreadgroups:MTLSizeMake(batch_size, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
         
-        [encoder endEncoding];
+        // [encoder endEncoding];
         stream->synchronize(SyncType::COMMIT);  // Non-blocking for forward pass integration
     }
     
@@ -5326,8 +5326,8 @@ torch::Tensor gather_metal(torch::Tensor src, torch::Tensor index, int64_t dim_)
         }
         
         @autoreleasepool {
-            id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
-            id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+            MPSStream* stream = at::mps::getCurrentMPSStream();
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             
             [encoder setComputePipelineState:kernels.gather1dPSO];
             [encoder setBuffer:getMTLBufferStorage(s) offset:s.storage_offset() * s.element_size() atIndex:0];
@@ -5340,7 +5340,7 @@ torch::Tensor gather_metal(torch::Tensor src, torch::Tensor index, int64_t dim_)
             [encoder dispatchThreads:MTLSizeMake(n, 1, 1)
                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             
-            [encoder endEncoding];
+            // [encoder endEncoding];
             torch::mps::synchronize();
         }
         
@@ -5369,8 +5369,8 @@ torch::Tensor scatter_add_metal(torch::Tensor dst, torch::Tensor index, torch::T
         }
         
         @autoreleasepool {
-            id<MTLCommandBuffer> cmdBuf = torch::mps::get_command_buffer();
-            id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+            MPSStream* stream = at::mps::getCurrentMPSStream();
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             
             [encoder setComputePipelineState:kernels.scatterAdd1dPSO];
             [encoder setBuffer:getMTLBufferStorage(output) offset:output.storage_offset() * output.element_size() atIndex:0];
@@ -5383,7 +5383,7 @@ torch::Tensor scatter_add_metal(torch::Tensor dst, torch::Tensor index, torch::T
             [encoder dispatchThreads:MTLSizeMake(n, 1, 1)
                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
             
-            [encoder endEncoding];
+            // [encoder endEncoding];
             torch::mps::synchronize();
         }
         
@@ -6442,7 +6442,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
         else pso = kernels.swigluFwdStridedPSO;
         
         if (pso) {
-            id<MTLComputeCommandEncoder> encoder = [cmdBuf computeCommandEncoder];
+            id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
             [encoder setComputePipelineState:pso];
             int64_t elem_size = (is_half || is_bfloat) ? 2 : 4;
             
@@ -6471,7 +6471,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
             MTLSize threadgroups = MTLSizeMake((cols + 31) / 32, (rows + 7) / 8, 1);
             
             [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
-            [encoder endEncoding];
+            // [encoder endEncoding];
         }
         stream->synchronize(SyncType::COMMIT_AND_WAIT);
     }
