@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 """
 Least Squares Solver using QR + TRSM
 

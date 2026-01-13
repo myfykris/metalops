@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 """
 Householder Reflections - Core orthogonalization primitive.
 

@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 
 import torch
 import torch.nn as nn

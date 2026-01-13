@@ -1,3 +1,6 @@
+// Author: Kris Bailey
+// Copyright 2026
+// Email: kris@krisbailey.com
 #include <metal_stdlib>
 using namespace metal;
 
@@ -1919,6 +1922,123 @@ kernel void fused_add_layernorm(
     }
 }
 
+kernel void fused_add_layernorm_half(
+    device const half* input [[buffer(0)]],
+    device const half* residual [[buffer(1)]],
+    device const half* weight [[buffer(2)]],
+    device const half* bias [[buffer(3)]],
+    device half* output [[buffer(4)]],
+    device float* mean_out [[buffer(5)]],
+    device float* rstd_out [[buffer(6)]],
+    constant uint& N [[buffer(7)]],
+    constant float& eps [[buffer(8)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    float local_sum = 0.0f;
+    float local_sum_sq = 0.0f;
+    
+    // Fused add and accumulate stats
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = float(input[offset + i]) + float(residual[offset + i]);
+        local_sum += val;
+        local_sum_sq += val * val;
+    }
+    
+    float simd_s = simd_sum(local_sum);
+    float simd_sq = simd_sum(local_sum_sq);
+    
+    threadgroup float sh_s[32], sh_sq[32];
+    if (simd_lane == 0) { sh_s[simd_group] = simd_s; sh_sq[simd_group] = simd_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float tot_s = 0, tot_sq = 0;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        tot_s = simd_sum((simd_lane < ng) ? sh_s[simd_lane] : 0.0f);
+        tot_sq = simd_sum((simd_lane < ng) ? sh_sq[simd_lane] : 0.0f);
+    }
+    if (simd_group == 0 && simd_lane == 0) { sh_s[0] = tot_s; sh_sq[0] = tot_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tot_s = sh_s[0]; tot_sq = sh_sq[0];
+    
+    float mean = tot_s / float(N);
+    float rstd = rsqrt(tot_sq / float(N) - mean * mean + eps);
+    
+    if (tid_x == 0) { mean_out[row] = mean; rstd_out[row] = rstd; }
+    
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = float(input[offset + i]) + float(residual[offset + i]);
+        float nval = (val - mean) * rstd;
+        output[offset + i] = half(nval * float(weight[i]) + float(bias[i]));
+    }
+}
+
+kernel void fused_add_layernorm_bfloat(
+    device const bfloat* input [[buffer(0)]],
+    device const bfloat* residual [[buffer(1)]],
+    device const bfloat* weight [[buffer(2)]],
+    device const bfloat* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]],
+    device float* mean_out [[buffer(5)]],
+    device float* rstd_out [[buffer(6)]],
+    constant uint& N [[buffer(7)]],
+    constant float& eps [[buffer(8)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tg_size [[threads_per_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = tgid.x;
+    uint offset = row * N;
+    uint tid_x = tid.x;
+    
+    float local_sum = 0.0f;
+    float local_sum_sq = 0.0f;
+    
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = float(input[offset + i]) + float(residual[offset + i]);
+        local_sum += val;
+        local_sum_sq += val * val;
+    }
+    
+    float simd_s = simd_sum(local_sum);
+    float simd_sq = simd_sum(local_sum_sq);
+    
+    threadgroup float sh_s[32], sh_sq[32];
+    if (simd_lane == 0) { sh_s[simd_group] = simd_s; sh_sq[simd_group] = simd_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float tot_s = 0, tot_sq = 0;
+    if (simd_group == 0) {
+        uint ng = (tg_size.x + 31) / 32;
+        tot_s = simd_sum((simd_lane < ng) ? sh_s[simd_lane] : 0.0f);
+        tot_sq = simd_sum((simd_lane < ng) ? sh_sq[simd_lane] : 0.0f);
+    }
+    if (simd_group == 0 && simd_lane == 0) { sh_s[0] = tot_s; sh_sq[0] = tot_sq; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    tot_s = sh_s[0]; tot_sq = sh_sq[0];
+    
+    float mean = tot_s / float(N);
+    float rstd = rsqrt(tot_sq / float(N) - mean * mean + eps);
+    
+    if (tid_x == 0) { mean_out[row] = mean; rstd_out[row] = rstd; }
+    
+    for (uint i = tid_x; i < N; i += tg_size.x) {
+        float val = float(input[offset + i]) + float(residual[offset + i]);
+        float nval = (val - mean) * rstd;
+        output[offset + i] = bfloat(nval * float(weight[i]) + float(bias[i]));
+    }
+}
+
 // =============================================================================
 // EMBEDDING BAG - Coalesced Reads + Parallel Reduction
 // =============================================================================
@@ -2083,4 +2203,1890 @@ kernel void index_select(
     
     uint src_idx = index[idx];
     out[idx * slice_size + slice_pos] = src[src_idx * slice_size + slice_pos];
+}
+
+// -----------------------------------------------------------------------------
+// RoPE (Rotary Position Embedding) Kernels
+// -----------------------------------------------------------------------------
+// Used by Llama, Mistral, Qwen, etc.
+// Applies rotation to query/key vectors based on position.
+//
+// Math:
+//   q_rot[..., 0::2] = q[..., 0::2] * cos - q[..., 1::2] * sin
+//   q_rot[..., 1::2] = q[..., 1::2] * cos + q[..., 0::2] * sin
+//
+// Dimensions:
+//   q/k: [batch, seq_len, num_heads, head_dim]
+//   cos/sin: [seq_len, head_dim/2] or [1, seq_len, 1, head_dim/2] (broadcastable)
+
+// Interleaved RoPE: pairs of consecutive elements get rotated together
+// This is the standard HuggingFace format
+kernel void rope_fwd_interleaved(
+    device const float* qk [[buffer(0)]],      // Query or Key [B, S, H, D]
+    device const float* cos [[buffer(1)]],      // [S, D/2]
+    device const float* sin [[buffer(2)]],      // [S, D/2]
+    device float* out [[buffer(3)]],            // Output [B, S, H, D]
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]       // (d, h, b*s)
+) {
+    uint d = gid.x;          // Dimension index (0 to head_dim-1)
+    uint h = gid.y;          // Head index
+    uint bs = gid.z;         // Batch * seq index
+    
+    if (d >= head_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;   // Batch index
+    uint s = bs % seq_len;   // Sequence position
+    
+    // Input offset: [b, s, h, d]
+    uint offset = ((b * seq_len + s) * num_heads + h) * head_dim + d;
+    
+    // cos/sin offset: [s, d/2]
+    uint half_d = d / 2;
+    uint cs_offset = s * (head_dim / 2) + half_d;
+    
+    float c = cos[cs_offset];
+    float sn = sin[cs_offset];
+    
+    // Interleaved rotation: even indices use (x0, x1), odd indices use (-x1, x0)
+    float x = qk[offset];
+    float x_pair;
+    
+    if (d % 2 == 0) {
+        // Even index: pair with next element
+        x_pair = qk[offset + 1];
+        out[offset] = x * c - x_pair * sn;
+    } else {
+        // Odd index: pair with previous element
+        x_pair = qk[offset - 1];
+        out[offset] = x * c + x_pair * sn;
+    }
+}
+
+// Half-precision version
+kernel void rope_fwd_interleaved_half(
+    device const half* qk [[buffer(0)]],
+    device const half* cos [[buffer(1)]],
+    device const half* sin [[buffer(2)]],
+    device half* out [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    if (d >= head_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint offset = ((b * seq_len + s) * num_heads + h) * head_dim + d;
+    uint half_d = d / 2;
+    uint cs_offset = s * (head_dim / 2) + half_d;
+    
+    float c = float(cos[cs_offset]);
+    float sn = float(sin[cs_offset]);
+    
+    float x = float(qk[offset]);
+    float x_pair;
+    
+    if (d % 2 == 0) {
+        x_pair = float(qk[offset + 1]);
+        out[offset] = half(x * c - x_pair * sn);
+    } else {
+        x_pair = float(qk[offset - 1]);
+        out[offset] = half(x * c + x_pair * sn);
+    }
+}
+
+// Backward pass for RoPE (same rotation formula but different sign arrangement)
+// d_qk = d_out rotated by -theta (same as forward but swap sin sign)
+kernel void rope_bwd_interleaved(
+    device const float* d_out [[buffer(0)]],    // Gradient from upstream [B, S, H, D]
+    device const float* cos [[buffer(1)]],
+    device const float* sin [[buffer(2)]],
+    device float* d_qk [[buffer(3)]],           // Gradient to q/k [B, S, H, D]
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    if (d >= head_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint offset = ((b * seq_len + s) * num_heads + h) * head_dim + d;
+    uint half_d = d / 2;
+    uint cs_offset = s * (head_dim / 2) + half_d;
+    
+    float c = cos[cs_offset];
+    float sn = sin[cs_offset];
+    
+    float dout = d_out[offset];
+    float dout_pair;
+    
+    // Backward: rotate by -theta (swap sin sign)
+    if (d % 2 == 0) {
+        dout_pair = d_out[offset + 1];
+        d_qk[offset] = dout * c + dout_pair * sn;  // Note: +sn instead of -sn
+    } else {
+        dout_pair = d_out[offset - 1];
+        d_qk[offset] = dout * c - dout_pair * sn;  // Note: -sn instead of +sn
+    }
+}
+
+// Fused RoPE for both Q and K at once (more efficient)
+kernel void rope_fwd_qk_fused(
+    device const float* Q [[buffer(0)]],        // [B, S, H, D]
+    device const float* K [[buffer(1)]],        // [B, S, H_kv, D]
+    device const float* cos [[buffer(2)]],      // [S, D/2]
+    device const float* sin [[buffer(3)]],      // [S, D/2]
+    device float* Q_out [[buffer(4)]],
+    device float* K_out [[buffer(5)]],
+    constant uint& batch_size [[buffer(6)]],
+    constant uint& seq_len [[buffer(7)]],
+    constant uint& num_heads_q [[buffer(8)]],
+    constant uint& num_heads_kv [[buffer(9)]],
+    constant uint& head_dim [[buffer(10)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    if (d >= head_dim || bs >= batch_size * seq_len) return;
+    
+    uint half_d = d / 2;
+    uint cs_offset = s * (head_dim / 2) + half_d;
+    float c = cos[cs_offset];
+    float sn = sin[cs_offset];
+    
+    // Process Q if this head is valid
+    if (h < num_heads_q) {
+        uint q_offset = ((b * seq_len + s) * num_heads_q + h) * head_dim + d;
+        float q = Q[q_offset];
+        float q_pair = (d % 2 == 0) ? Q[q_offset + 1] : Q[q_offset - 1];
+        
+        if (d % 2 == 0) {
+            Q_out[q_offset] = q * c - q_pair * sn;
+        } else {
+            Q_out[q_offset] = q * c + q_pair * sn;
+        }
+    }
+    
+    // Process K if this head is valid for KV (may be fewer heads for GQA)
+    if (h < num_heads_kv) {
+        uint k_offset = ((b * seq_len + s) * num_heads_kv + h) * head_dim + d;
+        float k = K[k_offset];
+        float k_pair = (d % 2 == 0) ? K[k_offset + 1] : K[k_offset - 1];
+        
+        if (d % 2 == 0) {
+            K_out[k_offset] = k * c - k_pair * sn;
+        } else {
+            K_out[k_offset] = k * c + k_pair * sn;
+        }
+    }
+}
+
+// =============================================================================
+// Split-Half RoPE (HuggingFace/Liger style)
+// =============================================================================
+// This is the dominant format in HuggingFace Transformers.
+// x1 = x[..., :D/2], x2 = x[..., D/2:]
+// out[..., :D/2] = x1 * cos - x2 * sin
+// out[..., D/2:] = x2 * cos + x1 * sin
+//
+// More memory-efficient: each thread handles one element in the first half
+// and its corresponding element in the second half.
+
+kernel void rope_fwd_split_half(
+    device const float* qk [[buffer(0)]],       // [B, S, H, D]
+    device const float* cos [[buffer(1)]],       // [S, D/2]
+    device const float* sin [[buffer(2)]],       // [S, D/2]
+    device float* out [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]        // (d, h, b*s) where d in [0, D/2)
+) {
+    uint d = gid.x;              // Index into first half [0, D/2)
+    uint h = gid.y;              // Head index
+    uint bs = gid.z;             // Batch * seq index
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    // Base offset for this (batch, seq, head)
+    uint base = ((b * seq_len + s) * num_heads + h) * head_dim;
+    
+    // Load x1 (first half) and x2 (second half)
+    float x1 = qk[base + d];
+    float x2 = qk[base + half_dim + d];
+    
+    // cos/sin offset: [s, d]
+    uint cs_offset = s * half_dim + d;
+    float c = cos[cs_offset];
+    float sn = sin[cs_offset];
+    
+    // Apply rotation
+    out[base + d] = x1 * c - x2 * sn;
+    out[base + half_dim + d] = x2 * c + x1 * sn;
+}
+
+// Half-precision split-half
+kernel void rope_fwd_split_half_half(
+    device const half* qk [[buffer(0)]],
+    device const half* cos [[buffer(1)]],
+    device const half* sin [[buffer(2)]],
+    device half* out [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint base = ((b * seq_len + s) * num_heads + h) * head_dim;
+    
+    float x1 = float(qk[base + d]);
+    float x2 = float(qk[base + half_dim + d]);
+    
+    uint cs_offset = s * half_dim + d;
+    float c = float(cos[cs_offset]);
+    float sn = float(sin[cs_offset]);
+    
+    out[base + d] = half(x1 * c - x2 * sn);
+    out[base + half_dim + d] = half(x2 * c + x1 * sn);
+}
+
+// Split-half backward
+kernel void rope_bwd_split_half(
+    device const float* d_out [[buffer(0)]],
+    device const float* cos [[buffer(1)]],
+    device const float* sin [[buffer(2)]],
+    device float* d_qk [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint base = ((b * seq_len + s) * num_heads + h) * head_dim;
+    
+    float dy1 = d_out[base + d];
+    float dy2 = d_out[base + half_dim + d];
+    
+    uint cs_offset = s * half_dim + d;
+    float c = cos[cs_offset];
+    float sn = sin[cs_offset];
+    
+    // Backward: y1 = x1*c - x2*s, y2 = x2*c + x1*s
+    // dx1 = dy1*c + dy2*s
+    // dx2 = -dy1*s + dy2*c
+    d_qk[base + d] = dy1 * c + dy2 * sn;
+    d_qk[base + half_dim + d] = -dy1 * sn + dy2 * c;
+}
+
+// BFloat16 split-half forward
+kernel void rope_fwd_split_half_bfloat(
+    device const bfloat* qk [[buffer(0)]],
+    device const bfloat* cos [[buffer(1)]],
+    device const bfloat* sin [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint base = ((b * seq_len + s) * num_heads + h) * head_dim;
+    
+    float x1 = float(qk[base + d]);
+    float x2 = float(qk[base + half_dim + d]);
+    
+    uint cs_offset = s * half_dim + d;
+    float c = float(cos[cs_offset]);
+    float sn = float(sin[cs_offset]);
+    
+    out[base + d] = bfloat(x1 * c - x2 * sn);
+    out[base + half_dim + d] = bfloat(x2 * c + x1 * sn);
+}
+
+// BFloat16 split-half backward
+// BFloat16 split-half backward (Vectorized)
+kernel void rope_bwd_split_half_bfloat(
+    device const bfloat* d_out [[buffer(0)]],
+    device const bfloat* cos [[buffer(1)]],
+    device const bfloat* sin [[buffer(2)]],
+    device bfloat* d_qk [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    // We process 4 elements per thread to amortize conversion cost
+    uint d = gid.x * 4;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint base = ((b * seq_len + s) * num_heads + h) * head_dim;
+    
+    // Vectorized Load High/Low parts
+    // Note: We cast to bfloat4* which requires 8-byte alignment? 
+    // Usually head_dim is large enough, but indices are base+d.
+    // base is (index * head_dim). If head_dim is multiple of 4, base+d is multiple of 4 (bfloat) = 8 bytes.
+    // Safe for standard LLM shapes.
+    
+    bfloat4 dy1_b = *((device const bfloat4*)(d_out + base + d));
+    bfloat4 dy2_b = *((device const bfloat4*)(d_out + base + half_dim + d));
+    
+    float4 dy1 = float4(dy1_b);
+    float4 dy2 = float4(dy2_b);
+    
+    uint cs_offset = s * half_dim + d;
+    bfloat4 c_b = *((device const bfloat4*)(cos + cs_offset));
+    bfloat4 s_b = *((device const bfloat4*)(sin + cs_offset));
+    
+    float4 c = float4(c_b);
+    float4 sn = float4(s_b);
+    
+    float4 res1 = dy1 * c + dy2 * sn;
+    float4 res2 = -dy1 * sn + dy2 * c;
+    
+    *((device bfloat4*)(d_qk + base + d)) = bfloat4(res1);
+    *((device bfloat4*)(d_qk + base + half_dim + d)) = bfloat4(res2);
+}
+
+// Fused Q+K split-half (in-place, matches Liger style)
+kernel void rope_fwd_qk_split_half(
+    device float* Q [[buffer(0)]],               // [B, S, H_q, D] - MODIFIED IN PLACE
+    device float* K [[buffer(1)]],               // [B, S, H_kv, D] - MODIFIED IN PLACE
+    device const float* cos [[buffer(2)]],       // [S, D/2]
+    device const float* sin [[buffer(3)]],       // [S, D/2]
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads_q [[buffer(6)]],
+    constant uint& num_heads_kv [[buffer(7)]],
+    constant uint& head_dim [[buffer(8)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;               // [0, D/2)
+    uint h = gid.y;               // Max of num_heads_q, num_heads_kv
+    uint bs = gid.z;
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint cs_offset = s * half_dim + d;
+    float c = cos[cs_offset];
+    float sn = sin[cs_offset];
+    
+    // Process Q
+    if (h < num_heads_q) {
+        uint q_base = ((b * seq_len + s) * num_heads_q + h) * head_dim;
+        float q1 = Q[q_base + d];
+        float q2 = Q[q_base + half_dim + d];
+        Q[q_base + d] = q1 * c - q2 * sn;
+        Q[q_base + half_dim + d] = q2 * c + q1 * sn;
+    }
+    
+    // Process K
+    if (h < num_heads_kv) {
+        uint k_base = ((b * seq_len + s) * num_heads_kv + h) * head_dim;
+        float k1 = K[k_base + d];
+        float k2 = K[k_base + half_dim + d];
+        K[k_base + d] = k1 * c - k2 * sn;
+        K[k_base + half_dim + d] = k2 * c + k1 * sn;
+    }
+}
+
+// =============================================================================
+// FUSED SwiGLU ACTIVATION
+// =============================================================================
+// SwiGLU(gate, up) = silu(gate) * up = (gate * sigmoid(gate)) * up
+// This is the elementwise fusion part of the MLP. The matmuls (gate_proj,
+// up_proj, down_proj) still use MPS for optimal performance.
+//
+// Typical MLP flow:
+//   gate = x @ W_gate.T  (MPS matmul)
+//   up = x @ W_up.T      (MPS matmul)  
+//   hidden = swiglu(gate, up)  <-- THIS KERNEL
+//   out = hidden @ W_down.T   (MPS matmul)
+//
+// This kernel fuses: hidden = silu(gate) * up
+
+kernel void swiglu_fwd(
+    device const float* gate [[buffer(0)]],    // [M, N]
+    device const float* up [[buffer(1)]],      // [M, N]
+    device float* out [[buffer(2)]],           // [M, N]
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    
+    float g = gate[id];
+    float u = up[id];
+    
+    // silu(gate) * up = gate / (1 + exp(-gate)) * up
+    float silu_g = g / (1.0f + exp(-g));
+    out[id] = silu_g * u;
+}
+
+kernel void swiglu_fwd_half(
+    device const half* gate [[buffer(0)]],
+    device half* up [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    
+    float g = float(gate[id]);
+    float u = float(up[id]);
+    
+    float silu_g = g / (1.0f + exp(-g));
+    out[id] = half(silu_g * u);
+}
+
+// Vectorized version for better memory bandwidth
+kernel void swiglu_fwd_vec4(
+    device const float4* gate [[buffer(0)]],
+    device const float4* up [[buffer(1)]],
+    device float4* out [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    float4 g = gate[id];
+    float4 u = up[id];
+    
+    // Vectorized silu(gate) * up
+    float4 silu_g = g / (1.0f + exp(-g));
+    out[id] = silu_g * u;
+}
+
+kernel void swiglu_fwd_half_vec4(
+    device const half4* gate [[buffer(0)]],
+    device const half4* up [[buffer(1)]],
+    device half4* out [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    
+    float4 g = float4(gate[id]);
+    float4 u = float4(up[id]);
+    
+    float4 silu_g = g / (1.0f + exp(-g));
+    out[id] = half4(silu_g * u);
+}
+
+// -----------------------------------------------------------------------------
+// Strided SwiGLU Kernels (2D Dispatch)
+// Handles non-contiguous / transposed data correctly
+// -----------------------------------------------------------------------------
+
+kernel void swiglu_fwd_strided_half(
+    device const half* gate [[buffer(0)]],
+    device half* up [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    constant uint2& shape [[buffer(3)]],     // [rows, cols]
+    constant uint2& s_gate [[buffer(4)]],    // [stride_0, stride_1]
+    constant uint2& s_up [[buffer(5)]],
+    constant uint2& s_out [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    if (row >= shape.x || col >= shape.y) return;
+    
+    uint idx_g = row * s_gate.x + col * s_gate.y;
+    uint idx_u = row * s_up.x + col * s_up.y;
+    uint idx_o = row * s_out.x + col * s_out.y;
+    
+    float g = float(gate[idx_g]);
+    float u = float(up[idx_u]);
+    
+    float silu_g = g / (1.0f + exp(-g));
+    
+    // In-place friendly
+    out[idx_o] = half(silu_g * u);
+}
+
+kernel void swiglu_fwd_strided_bfloat(
+    device const bfloat* gate [[buffer(0)]],
+    device bfloat* up [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint2& shape [[buffer(3)]],
+    constant uint2& s_gate [[buffer(4)]],
+    constant uint2& s_up [[buffer(5)]],
+    constant uint2& s_out [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    if (row >= shape.x || col >= shape.y) return;
+    
+    uint idx_g = row * s_gate.x + col * s_gate.y;
+    uint idx_u = row * s_up.x + col * s_up.y;
+    uint idx_o = row * s_out.x + col * s_out.y;
+    
+    float g = float(gate[idx_g]);
+    float u = float(up[idx_u]);
+    
+    float silu_g = g / (1.0f + exp(-g));
+    
+    out[idx_o] = bfloat(silu_g * u);
+}
+
+kernel void swiglu_fwd_strided_float(
+    device const float* gate [[buffer(0)]],
+    device float* up [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint2& shape [[buffer(3)]],
+    constant uint2& s_gate [[buffer(4)]],
+    constant uint2& s_up [[buffer(5)]],
+    constant uint2& s_out [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    if (row >= shape.x || col >= shape.y) return;
+    
+    uint idx_g = row * s_gate.x + col * s_gate.y;
+    uint idx_u = row * s_up.x + col * s_up.y;
+    uint idx_o = row * s_out.x + col * s_out.y;
+    
+    float g = gate[idx_g];
+    float u = up[idx_u];
+    
+    float silu_g = g / (1.0f + exp(-g));
+    
+    out[idx_o] = silu_g * u;
+}
+
+// =============================================================================
+// FUSED LoRA LINEAR FORWARD
+// =============================================================================
+// Computes: y = x @ W.T + scale * (x @ A.T @ B.T)
+// 
+// Traditional approach (3+ kernel calls):
+//   temp1 = x @ A.T           // Small: [M, r]
+//   temp2 = temp1 @ B.T       // [M, N]
+//   base = x @ W.T            // [M, N]
+//   y = base + scale * temp2  // Elementwise
+//
+// This kernel fuses the final addition: y = base + scale * lora
+// The matmuls still use MPS, but we save one kernel call + memory roundtrip.
+//
+// For full fusion (single kernel doing all matmuls), we'd need to beat MPS
+// which is extremely difficult. This partial fusion is the pragmatic approach.
+
+kernel void lora_add_fwd(
+    device const float* base [[buffer(0)]],    // [M, N] from x @ W.T
+    device const float* lora [[buffer(1)]],    // [M, N] from x @ A.T @ B.T
+    device float* out [[buffer(2)]],           // [M, N]
+    constant float& scale [[buffer(3)]],       // LoRA scaling factor (alpha/r)
+    constant uint& numel [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    out[id] = base[id] + scale * lora[id];
+}
+
+kernel void lora_add_fwd_half(
+    device const half* base [[buffer(0)]],
+    device const half* lora [[buffer(1)]],
+    device half* out [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    constant uint& numel [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    out[id] = half(float(base[id]) + scale * float(lora[id]));
+}
+
+kernel void lora_add_fwd_vec4(
+    device const float4* base [[buffer(0)]],
+    device const float4* lora [[buffer(1)]],
+    device float4* out [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    constant uint& numel [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    uint numel_vec = numel / 4;
+    if (id >= numel_vec) return;
+    out[id] = base[id] + scale * lora[id];
+}
+
+kernel void lora_add_fwd_half_vec4(
+    device const half4* base [[buffer(0)]],
+    device const half4* lora [[buffer(1)]],
+    device half4* out [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    constant uint& numel [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    out[id] = half4(float4(base[id]) + scale * float4(lora[id]));
+}
+
+// BFloat16 versions
+kernel void swiglu_fwd_bfloat(
+    device const bfloat* gate [[buffer(0)]],
+    device const bfloat* up [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    
+    float g = float(gate[id]);
+    float u = float(up[id]);
+    
+    float silu_g = g / (1.0f + exp(-g));
+    out[id] = bfloat(silu_g * u);
+}
+
+kernel void lora_add_fwd_bfloat(
+    device const bfloat* base [[buffer(0)]],
+    device const bfloat* lora [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    constant uint& numel [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= numel) return;
+    out[id] = bfloat(float(base[id]) + scale * float(lora[id]));
+}
+
+
+
+
+// =============================================================================
+// FUSED CROSS-ENTROPY LOSS
+// =============================================================================
+// Computes: loss = -log(softmax(logits)[target])
+// 
+// This is critical for LLM training - avoids materializing full vocab softmax.
+// For vocab_size=32K, this saves 32K * batch_size * 4 bytes per forward pass.
+//
+// Algorithm (numerically stable):
+// 1. Find max logit for stability
+// 2. Compute log-sum-exp: logsumexp = max + log(sum(exp(logits - max)))
+// 3. loss = logsumexp - logits[target]
+//
+// Grid: One thread per sequence position (batch_size threads)
+
+// =============================================================================
+// CROSS-ENTROPY - THREADGROUP PARALLEL SIMD REDUCTION
+// =============================================================================
+// Uses same optimization strategy as softmax_bwd:
+// - One threadgroup (256 threads) per batch element
+// - Threads cooperate on finding max and computing sum_exp
+// - simd_sum for fast SIMD-level reduction
+// - ILP-8 unrolling for memory bandwidth
+// - Online softmax variant for numerical stability
+
+constant uint CE_THREADS = 256;
+
+kernel void cross_entropy_fwd(
+    device const float* logits [[buffer(0)]],    // [batch_size, vocab_size]
+    device const int* targets [[buffer(1)]],     // [batch_size]
+    device float* losses [[buffer(2)]],          // [batch_size]
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& vocab_size [[buffer(4)]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]  // [16] for max and sum partials
+) {
+    if (batch_idx >= batch_size) return;
+    
+    device const float* row = logits + batch_idx * vocab_size;
+    int target = targets[batch_idx];
+    
+    // Phase 1: Find max with parallel reduction
+    float local_max = -INFINITY;
+    uint stride = CE_THREADS;
+    uint V8 = (vocab_size / 8) * 8;
+    
+    // ILP-8 unrolled max finding
+    for (uint i = tid_in_group * 8; i < V8; i += stride * 8) {
+        float v0 = row[i], v1 = row[i+1], v2 = row[i+2], v3 = row[i+3];
+        float v4 = row[i+4], v5 = row[i+5], v6 = row[i+6], v7 = row[i+7];
+        local_max = max(local_max, max(max(v0, v1), max(v2, v3)));
+        local_max = max(local_max, max(max(v4, v5), max(v6, v7)));
+    }
+    for (uint i = V8 + tid_in_group; i < vocab_size; i += stride) {
+        local_max = max(local_max, row[i]);
+    }
+    
+    // SIMD reduction for max
+    local_max = simd_max(local_max);
+    if (simd_lane == 0) {
+        shared[simd_group] = local_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_max = -INFINITY;
+    if (simd_group == 0) {
+        if (simd_lane < 8) {
+            global_max = shared[simd_lane];
+        }
+        global_max = simd_max(global_max);
+        if (simd_lane == 0) {
+            shared[0] = global_max;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared[0];
+    
+    // Phase 2: Compute sum_exp with parallel reduction
+    float local_sum = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    
+    for (uint i = tid_in_group * 8; i < V8; i += stride * 8) {
+        acc0 += exp(row[i] - global_max);
+        acc1 += exp(row[i+1] - global_max);
+        acc2 += exp(row[i+2] - global_max);
+        acc3 += exp(row[i+3] - global_max);
+        acc0 += exp(row[i+4] - global_max);
+        acc1 += exp(row[i+5] - global_max);
+        acc2 += exp(row[i+6] - global_max);
+        acc3 += exp(row[i+7] - global_max);
+    }
+    local_sum = acc0 + acc1 + acc2 + acc3;
+    for (uint i = V8 + tid_in_group; i < vocab_size; i += stride) {
+        local_sum += exp(row[i] - global_max);
+    }
+    
+    // SIMD reduction for sum
+    local_sum = simd_sum(local_sum);
+    if (simd_lane == 0) {
+        shared[simd_group + 8] = local_sum;  // Use upper half of shared
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_sum = 0.0f;
+    if (simd_group == 0) {
+        if (simd_lane < 8) {
+            global_sum = shared[simd_lane + 8];
+        }
+        global_sum = simd_sum(global_sum);
+        if (simd_lane == 0) {
+            // Compute final loss: log(sum_exp) + max - logits[target]
+            float log_sum_exp = global_max + log(global_sum);
+            losses[batch_idx] = log_sum_exp - row[target];
+        }
+    }
+}
+
+// Half precision version with same threadgroup-parallel strategy
+kernel void cross_entropy_fwd_half(
+    device const half* logits [[buffer(0)]],
+    device const int* targets [[buffer(1)]],
+    device float* losses [[buffer(2)]],
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& vocab_size [[buffer(4)]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]
+) {
+    if (batch_idx >= batch_size) return;
+    
+    device const half* row = logits + batch_idx * vocab_size;
+    int target = targets[batch_idx];
+    
+    // Phase 1: Find max with parallel reduction (compute in float)
+    float local_max = -INFINITY;
+    uint stride = CE_THREADS;
+    uint V8 = (vocab_size / 8) * 8;
+    
+    for (uint i = tid_in_group * 8; i < V8; i += stride * 8) {
+        // Load half4 pairs for memory coalescing
+        half4 h_lo = *reinterpret_cast<device const half4*>(row + i);
+        half4 h_hi = *reinterpret_cast<device const half4*>(row + i + 4);
+        local_max = max(local_max, max(max(float(h_lo.x), float(h_lo.y)), max(float(h_lo.z), float(h_lo.w))));
+        local_max = max(local_max, max(max(float(h_hi.x), float(h_hi.y)), max(float(h_hi.z), float(h_hi.w))));
+    }
+    for (uint i = V8 + tid_in_group; i < vocab_size; i += stride) {
+        local_max = max(local_max, float(row[i]));
+    }
+    
+    local_max = simd_max(local_max);
+    if (simd_lane == 0) {
+        shared[simd_group] = local_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_max = -INFINITY;
+    if (simd_group == 0) {
+        if (simd_lane < 8) global_max = shared[simd_lane];
+        global_max = simd_max(global_max);
+        if (simd_lane == 0) shared[0] = global_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared[0];
+    
+    // Phase 2: Compute sum_exp
+    float local_sum = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    
+    for (uint i = tid_in_group * 8; i < V8; i += stride * 8) {
+        half4 h_lo = *reinterpret_cast<device const half4*>(row + i);
+        half4 h_hi = *reinterpret_cast<device const half4*>(row + i + 4);
+        acc0 += exp(float(h_lo.x) - global_max) + exp(float(h_lo.y) - global_max);
+        acc1 += exp(float(h_lo.z) - global_max) + exp(float(h_lo.w) - global_max);
+        acc2 += exp(float(h_hi.x) - global_max) + exp(float(h_hi.y) - global_max);
+        acc3 += exp(float(h_hi.z) - global_max) + exp(float(h_hi.w) - global_max);
+    }
+    local_sum = acc0 + acc1 + acc2 + acc3;
+    for (uint i = V8 + tid_in_group; i < vocab_size; i += stride) {
+        local_sum += exp(float(row[i]) - global_max);
+    }
+    
+    local_sum = simd_sum(local_sum);
+    if (simd_lane == 0) {
+        shared[simd_group + 8] = local_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float global_sum = 0.0f;
+    if (simd_group == 0) {
+        if (simd_lane < 8) global_sum = shared[simd_lane + 8];
+        global_sum = simd_sum(global_sum);
+        if (simd_lane == 0) {
+            float log_sum_exp = global_max + log(global_sum);
+            losses[batch_idx] = log_sum_exp - float(row[target]);
+        }
+    }
+}
+
+// =============================================================================
+// KL DIVERGENCE FOR DISTILLATION
+// =============================================================================
+// Computes: KL(P || Q) = sum(P * log(P / Q)) = sum(P * (log_P - log_Q))
+// Where P = teacher probs, Q = student probs
+//
+// For efficiency, we work with log-probs directly:
+// KL = sum(exp(log_P) * (log_P - log_Q))
+//
+// Grid: One thread per sequence position
+
+kernel void kl_div_fwd(
+    device const float* log_p [[buffer(0)]],     // [batch, vocab]
+    device const float* log_q [[buffer(1)]],     // [batch, vocab]
+    device float* losses [[buffer(2)]],          // [batch]
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& vocab_size [[buffer(4)]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]
+) {
+    if (batch_idx >= batch_size) return;
+    
+    device const float* p_row = log_p + batch_idx * vocab_size;
+    device const float* q_row = log_q + batch_idx * vocab_size;
+    
+    // Threadgroup-level reduction
+    // ILP-4 unrolling
+    float local_sum = 0.0f;
+    uint stride = 256; // Assumes fixed threadgroup size of 256 for now, or passed in
+    
+    for (uint i = tid_in_group; i < vocab_size; i += stride) {
+        float p_val = p_row[i];
+        float q_val = q_row[i];
+        float p_i = exp(p_val);
+        local_sum += p_i * (p_val - q_val);
+    }
+    
+    // SIMD reduction
+    local_sum = simd_sum(local_sum);
+    
+    // Write to shared memory (one per SIMD group)
+    if (simd_lane == 0) {
+        shared[simd_group] = local_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Final reduction by first SIMD group
+    if (simd_group == 0) {
+        float group_sum = 0.0f;
+        // Assuming max 256 threads -> 8 SIMD groups. 
+        // We can just sum them all in lane 0 or reduced again.
+        // Safer: load all partials (up to 8) and reduce.
+        if (simd_lane < 8) { // Max 8 SIMD groups for 256 threads
+            group_sum = shared[simd_lane];
+        }
+        group_sum = simd_sum(group_sum);
+        
+        if (simd_lane == 0) {
+            losses[batch_idx] = group_sum;
+        }
+    }
+}
+
+// Top-K version for efficiency (only compute KL on top-k teacher tokens)
+kernel void kl_div_topk_fwd(
+    device const float* log_p [[buffer(0)]],     // Teacher log-probs [batch, vocab]
+    device const float* log_q [[buffer(1)]],     // Student log-probs [batch, vocab]
+    device const int* topk_indices [[buffer(2)]],// [batch, k] top-k token indices
+    device float* losses [[buffer(3)]],          // [batch]
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& vocab_size [[buffer(5)]],
+    constant uint& k [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= batch_size) return;
+    
+    device const float* p_row = log_p + tid * vocab_size;
+    device const float* q_row = log_q + tid * vocab_size;
+    device const int* indices = topk_indices + tid * k;
+    
+    float kl = 0.0f;
+    for (uint i = 0; i < k; i++) {
+        int idx = indices[i];
+        float p_i = exp(p_row[idx]);
+        kl += p_i * (p_row[idx] - q_row[idx]);
+    }
+    
+    losses[tid] = kl;
+}
+
+// =============================================================================
+// FUSED LoRA QKV PROJECTION
+// =============================================================================
+// Computes Q, K, V with LoRA in one pass:
+//   Q = W_q @ x + alpha * (B_q @ A_q @ x)
+//   K = W_k @ x + alpha * (B_k @ A_k @ x)
+//   V = W_v @ x + alpha * (B_v @ A_v @ x)
+//
+// This is a "scheduling" kernel - the actual matmuls use MPS, but we
+// orchestrate them efficiently. For now, we provide the building block:
+// a fused LoRA linear that can be called for each of Q, K, V.
+//
+// The real optimization is at the Python/C++ level where we:
+// 1. Batch the x @ A.T computation for all 3 projections if A matrices are same
+// 2. Use command buffer fusion to avoid sync overhead
+
+// Single LoRA linear: y = base + scale * lora
+// Already implemented as lora_add_fwd above
+
+// LoRA matmul helper: computes x @ A.T @ B.T in sequence
+// For actual use, we dispatch two MPS matmuls in the same command buffer
+// This kernel is just the final addition if needed separately
+
+kernel void lora_linear_fwd(
+    device const float* x [[buffer(0)]],         // [M, in_features]
+    device const float* W [[buffer(1)]],         // [out_features, in_features]
+    device const float* A [[buffer(2)]],         // [rank, in_features]
+    device const float* B [[buffer(3)]],         // [out_features, rank]
+    device float* out [[buffer(4)]],             // [M, out_features]
+    constant float& scale [[buffer(5)]],         // alpha / rank
+    constant uint& M [[buffer(6)]],              // batch
+    constant uint& in_features [[buffer(7)]],
+    constant uint& out_features [[buffer(8)]],
+    constant uint& rank [[buffer(9)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint m = gid.y;
+    uint n = gid.x;
+    
+    if (m >= M || n >= out_features) return;
+    
+    // Compute base: x @ W.T at position [m, n]
+    float base_val = 0.0f;
+    for (uint k = 0; k < in_features; k++) {
+        base_val += x[m * in_features + k] * W[n * in_features + k];
+    }
+    
+    // Compute LoRA: (x @ A.T) @ B.T at position [m, n]
+    // First compute x @ A.T to get [M, rank]
+    float lora_val = 0.0f;
+    for (uint r = 0; r < rank; r++) {
+        float xa = 0.0f;
+        for (uint k = 0; k < in_features; k++) {
+            xa += x[m * in_features + k] * A[r * in_features + k];
+        }
+        lora_val += xa * B[n * rank + r];
+    }
+    
+    out[m * out_features + n] = base_val + scale * lora_val;
+}
+
+// =============================================================================
+// SOFTMAX BACKWARD - THREADGROUP PARALLEL SIMD REDUCTION
+// =============================================================================
+// Computes: dX = softmax * (dY - sum(softmax * dY))
+//
+// OPTIMIZATION STRATEGY (matching PyTorch CUDA):
+// - One threadgroup per row (batch*head element)
+// - Threads within threadgroup cooperate on reduction
+// - Use simdgroup_sum for fast SIMD-level reduction
+// - Then use threadgroup shared memory for cross-SIMD reduction
+// - ILP-8 unrolling for memory bandwidth
+
+// Threadgroup size: 256 threads = 8 SIMDgroups of 32
+constant uint SOFTMAX_BWD_THREADS = 256;
+constant uint SIMD_SIZE = 32;
+
+kernel void softmax_bwd(
+    device const float* probs [[buffer(0)]],      // [N, L] softmax output
+    device const float* d_probs [[buffer(1)]],    // [N, L] upstream gradient
+    device float* d_logits [[buffer(2)]],         // [N, L] output gradient
+    constant uint& N [[buffer(3)]],               // batch * heads  
+    constant uint& L [[buffer(4)]],               // sequence length
+    uint row_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]  // [8] for simd group partial sums
+) {
+    if (row_idx >= N) return;
+    
+    device const float* p_row = probs + row_idx * L;
+    device const float* dp_row = d_probs + row_idx * L;
+    device float* dx_row = d_logits + row_idx * L;
+    
+    // Phase 1: Parallel reduction for dot = sum(p * dp)
+    // Each thread accumulates a partial sum with ILP-8 unrolling
+    float local_dot = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+    
+    uint stride = SOFTMAX_BWD_THREADS;
+    uint L8 = (L / 8) * 8;  // Round down to multiple of 8
+    
+    // Each thread processes elements stride apart, ILP-8 unrolled
+    for (uint i = tid_in_group * 8; i < L8; i += stride * 8) {
+        // Load 8 elements at a time (ILP-8)
+        float p0 = p_row[i], p1 = p_row[i+1], p2 = p_row[i+2], p3 = p_row[i+3];
+        float p4 = p_row[i+4], p5 = p_row[i+5], p6 = p_row[i+6], p7 = p_row[i+7];
+        float dp0 = dp_row[i], dp1 = dp_row[i+1], dp2 = dp_row[i+2], dp3 = dp_row[i+3];
+        float dp4 = dp_row[i+4], dp5 = dp_row[i+5], dp6 = dp_row[i+6], dp7 = dp_row[i+7];
+        
+        acc0 += p0 * dp0;
+        acc1 += p1 * dp1;
+        acc2 += p2 * dp2;
+        acc3 += p3 * dp3;
+        acc4 += p4 * dp4;
+        acc5 += p5 * dp5;
+        acc6 += p6 * dp6;
+        acc7 += p7 * dp7;
+    }
+    
+    local_dot = acc0 + acc1 + acc2 + acc3 + acc4 + acc5 + acc6 + acc7;
+    
+    // Handle remaining elements
+    for (uint i = L8 + tid_in_group; i < L; i += stride) {
+        local_dot += p_row[i] * dp_row[i];
+    }
+    
+    // SIMD-level reduction using simd_sum
+    local_dot = simd_sum(local_dot);
+    
+    // Store SIMD group partial sum to shared memory
+    if (simd_lane == 0) {
+        shared[simd_group] = local_dot;
+    }
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Final reduction across SIMD groups (only first SIMD group)
+    float dot = 0.0f;
+    if (simd_group == 0) {
+        uint num_simd_groups = SOFTMAX_BWD_THREADS / SIMD_SIZE;  // 8
+        if (simd_lane < num_simd_groups) {
+            dot = shared[simd_lane];
+        }
+        dot = simd_sum(dot);
+        // Broadcast to all threads in first simd group
+        if (simd_lane == 0) {
+            shared[0] = dot;
+        }
+    }
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    dot = shared[0];  // All threads read the final dot product
+    
+    // Phase 2: Compute output dx = p * (dp - dot)
+    // Each thread writes strided elements, ILP-8 unrolled
+    for (uint i = tid_in_group * 8; i < L8; i += stride * 8) {
+        float p0 = p_row[i], p1 = p_row[i+1], p2 = p_row[i+2], p3 = p_row[i+3];
+        float p4 = p_row[i+4], p5 = p_row[i+5], p6 = p_row[i+6], p7 = p_row[i+7];
+        float dp0 = dp_row[i], dp1 = dp_row[i+1], dp2 = dp_row[i+2], dp3 = dp_row[i+3];
+        float dp4 = dp_row[i+4], dp5 = dp_row[i+5], dp6 = dp_row[i+6], dp7 = dp_row[i+7];
+        
+        dx_row[i] = p0 * (dp0 - dot);
+        dx_row[i+1] = p1 * (dp1 - dot);
+        dx_row[i+2] = p2 * (dp2 - dot);
+        dx_row[i+3] = p3 * (dp3 - dot);
+        dx_row[i+4] = p4 * (dp4 - dot);
+        dx_row[i+5] = p5 * (dp5 - dot);
+        dx_row[i+6] = p6 * (dp6 - dot);
+        dx_row[i+7] = p7 * (dp7 - dot);
+    }
+    
+    // Handle remaining elements
+    for (uint i = L8 + tid_in_group; i < L; i += stride) {
+        dx_row[i] = p_row[i] * (dp_row[i] - dot);
+    }
+}
+
+// Half precision version with half8 vectorization
+kernel void softmax_bwd_half(
+    device const half* probs [[buffer(0)]],
+    device const half* d_probs [[buffer(1)]],
+    device half* d_logits [[buffer(2)]],
+    constant uint& N [[buffer(3)]],
+    constant uint& L [[buffer(4)]],
+    uint row_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]
+) {
+    if (row_idx >= N) return;
+    
+    device const half* p_row = probs + row_idx * L;
+    device const half* dp_row = d_probs + row_idx * L;
+    device half* dx_row = d_logits + row_idx * L;
+    
+    // Phase 1: Parallel reduction with half8 vectorization
+    float local_dot = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    
+    uint stride = SOFTMAX_BWD_THREADS;
+    uint L8 = (L / 8) * 8;
+    
+    // Process 8 half elements at a time per thread
+    for (uint i = tid_in_group * 8; i < L8; i += stride * 8) {
+        // Load as half4 pairs for better memory coalescing
+        half4 p_lo = *reinterpret_cast<device const half4*>(p_row + i);
+        half4 p_hi = *reinterpret_cast<device const half4*>(p_row + i + 4);
+        half4 dp_lo = *reinterpret_cast<device const half4*>(dp_row + i);
+        half4 dp_hi = *reinterpret_cast<device const half4*>(dp_row + i + 4);
+        
+        // Accumulate in float for precision
+        acc0 += float(p_lo.x) * float(dp_lo.x) + float(p_lo.y) * float(dp_lo.y);
+        acc1 += float(p_lo.z) * float(dp_lo.z) + float(p_lo.w) * float(dp_lo.w);
+        acc2 += float(p_hi.x) * float(dp_hi.x) + float(p_hi.y) * float(dp_hi.y);
+        acc3 += float(p_hi.z) * float(dp_hi.z) + float(p_hi.w) * float(dp_hi.w);
+    }
+    
+    local_dot = acc0 + acc1 + acc2 + acc3;
+    
+    for (uint i = L8 + tid_in_group; i < L; i += stride) {
+        local_dot += float(p_row[i]) * float(dp_row[i]);
+    }
+    
+    // SIMD reduction
+    local_dot = simd_sum(local_dot);
+    
+    if (simd_lane == 0) {
+        shared[simd_group] = local_dot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float dot = 0.0f;
+    if (simd_group == 0) {
+        if (simd_lane < 8) {
+            dot = shared[simd_lane];
+        }
+        dot = simd_sum(dot);
+        if (simd_lane == 0) {
+            shared[0] = dot;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    dot = shared[0];
+    
+    // Phase 2: Output with half4 vectorized writes
+    for (uint i = tid_in_group * 8; i < L8; i += stride * 8) {
+        half4 p_lo = *reinterpret_cast<device const half4*>(p_row + i);
+        half4 p_hi = *reinterpret_cast<device const half4*>(p_row + i + 4);
+        half4 dp_lo = *reinterpret_cast<device const half4*>(dp_row + i);
+        half4 dp_hi = *reinterpret_cast<device const half4*>(dp_row + i + 4);
+        
+        half4 dx_lo = half4(
+            half(float(p_lo.x) * (float(dp_lo.x) - dot)),
+            half(float(p_lo.y) * (float(dp_lo.y) - dot)),
+            half(float(p_lo.z) * (float(dp_lo.z) - dot)),
+            half(float(p_lo.w) * (float(dp_lo.w) - dot))
+        );
+        half4 dx_hi = half4(
+            half(float(p_hi.x) * (float(dp_hi.x) - dot)),
+            half(float(p_hi.y) * (float(dp_hi.y) - dot)),
+            half(float(p_hi.z) * (float(dp_hi.z) - dot)),
+            half(float(p_hi.w) * (float(dp_hi.w) - dot))
+        );
+        
+        *reinterpret_cast<device half4*>(dx_row + i) = dx_lo;
+        *reinterpret_cast<device half4*>(dx_row + i + 4) = dx_hi;
+    }
+    
+    for (uint i = L8 + tid_in_group; i < L; i += stride) {
+        dx_row[i] = half(float(p_row[i]) * (float(dp_row[i]) - dot));
+    }
+}
+
+// BFloat16 version
+kernel void softmax_bwd_bfloat(
+    device const bfloat* probs [[buffer(0)]],
+    device const bfloat* d_probs [[buffer(1)]],
+    device bfloat* d_logits [[buffer(2)]],
+    constant uint& N [[buffer(3)]],
+    constant uint& L [[buffer(4)]],
+    uint row_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]
+) {
+    if (row_idx >= N) return;
+    
+    device const bfloat* p_row = probs + row_idx * L;
+    device const bfloat* dp_row = d_probs + row_idx * L;
+    device bfloat* dx_row = d_logits + row_idx * L;
+    
+    float local_dot = 0.0f;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    
+    uint stride = SOFTMAX_BWD_THREADS;
+    uint L8 = (L / 8) * 8;
+    
+    // Process 8 bfloat elements (2x bfloat4)
+    for (uint i = tid_in_group * 8; i < L8; i += stride * 8) {
+        bfloat4 p_lo = *reinterpret_cast<device const bfloat4*>(p_row + i);
+        bfloat4 p_hi = *reinterpret_cast<device const bfloat4*>(p_row + i + 4);
+        bfloat4 dp_lo = *reinterpret_cast<device const bfloat4*>(dp_row + i);
+        bfloat4 dp_hi = *reinterpret_cast<device const bfloat4*>(dp_row + i + 4);
+        
+        acc0 += float(p_lo.x) * float(dp_lo.x) + float(p_lo.y) * float(dp_lo.y);
+        acc1 += float(p_lo.z) * float(dp_lo.z) + float(p_lo.w) * float(dp_lo.w);
+        acc2 += float(p_hi.x) * float(dp_hi.x) + float(p_hi.y) * float(dp_hi.y);
+        acc3 += float(p_hi.z) * float(dp_hi.z) + float(p_hi.w) * float(dp_hi.w);
+    }
+    
+    local_dot = acc0 + acc1 + acc2 + acc3;
+    
+    for (uint i = L8 + tid_in_group; i < L; i += stride) {
+        local_dot += float(p_row[i]) * float(dp_row[i]);
+    }
+    
+    // SIMD reduction
+    local_dot = simd_sum(local_dot);
+    
+    if (simd_lane == 0) {
+        shared[simd_group] = local_dot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float dot = 0.0f;
+    if (simd_group == 0) {
+        if (simd_lane < 8) {
+            dot = shared[simd_lane];
+        }
+        dot = simd_sum(dot);
+        if (simd_lane == 0) {
+            shared[0] = dot;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    dot = shared[0];
+    
+    // Output
+    for (uint i = tid_in_group * 8; i < L8; i += stride * 8) {
+        bfloat4 p_lo = *reinterpret_cast<device const bfloat4*>(p_row + i);
+        bfloat4 p_hi = *reinterpret_cast<device const bfloat4*>(p_row + i + 4);
+        bfloat4 dp_lo = *reinterpret_cast<device const bfloat4*>(dp_row + i);
+        bfloat4 dp_hi = *reinterpret_cast<device const bfloat4*>(dp_row + i + 4);
+        
+        bfloat4 dx_lo = bfloat4(
+            bfloat(float(p_lo.x) * (float(dp_lo.x) - dot)),
+            bfloat(float(p_lo.y) * (float(dp_lo.y) - dot)),
+            bfloat(float(p_lo.z) * (float(dp_lo.z) - dot)),
+            bfloat(float(p_lo.w) * (float(dp_lo.w) - dot))
+        );
+        bfloat4 dx_hi = bfloat4(
+            bfloat(float(p_hi.x) * (float(dp_hi.x) - dot)),
+            bfloat(float(p_hi.y) * (float(dp_hi.y) - dot)),
+            bfloat(float(p_hi.z) * (float(dp_hi.z) - dot)),
+            bfloat(float(p_hi.w) * (float(dp_hi.w) - dot))
+        );
+        
+        *reinterpret_cast<device bfloat4*>(dx_row + i) = dx_lo;
+        *reinterpret_cast<device bfloat4*>(dx_row + i + 4) = dx_hi;
+    }
+    
+    for (uint i = L8 + tid_in_group; i < L; i += stride) {
+        dx_row[i] = bfloat(float(p_row[i]) * (float(dp_row[i]) - dot));
+    }
+}
+
+// =============================================================================
+// FUSED LoRA QKV PROJECTION
+// =============================================================================
+// Computes Q, K, V with LoRA in a single kernel:
+//   Q = x @ W_q.T + scale_q * (x @ A_q.T @ B_q.T)
+//   K = x @ W_k.T + scale_k * (x @ A_k.T @ B_k.T)
+//   V = x @ W_v.T + scale_v * (x @ A_v.T @ B_v.T)
+//
+// This is a high-value fusion:
+// - 12 separate matmuls → 1 kernel dispatch
+// - All intermediate results stay in registers
+// - Massive reduction in kernel launch overhead
+//
+// Grid: 2D, (out_features_total, M) where out_features_total = 3 * head_dim * num_heads
+
+kernel void fused_lora_qkv_fwd(
+    device const float* x [[buffer(0)]],           // [M, in_features]
+    device const float* W_q [[buffer(1)]],         // [out_q, in_features]
+    device const float* W_k [[buffer(2)]],         // [out_k, in_features]
+    device const float* W_v [[buffer(3)]],         // [out_v, in_features]
+    device const float* A_q [[buffer(4)]],         // [rank, in_features]
+    device const float* B_q [[buffer(5)]],         // [out_q, rank]
+    device const float* A_k [[buffer(6)]],         // [rank, in_features]
+    device const float* B_k [[buffer(7)]],         // [out_k, rank]
+    device const float* A_v [[buffer(8)]],         // [rank, in_features]
+    device const float* B_v [[buffer(9)]],         // [out_v, rank]
+    device float* Q [[buffer(10)]],                // [M, out_q]
+    device float* K [[buffer(11)]],                // [M, out_k]
+    device float* V [[buffer(12)]],                // [M, out_v]
+    constant float& scale [[buffer(13)]],          // alpha / rank
+    constant uint& M [[buffer(14)]],               // batch * seq
+    constant uint& in_features [[buffer(15)]],     // hidden_dim
+    constant uint& out_q [[buffer(16)]],           // num_heads * head_dim
+    constant uint& out_k [[buffer(17)]],           // num_kv_heads * head_dim
+    constant uint& out_v [[buffer(18)]],           // num_kv_heads * head_dim
+    constant uint& rank [[buffer(19)]],            // LoRA rank
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint m = gid.y;  // batch/seq position
+    uint n = gid.x;  // output position
+    
+    if (m >= M) return;
+    
+    // Determine which projection (Q, K, or V) and local output index
+    uint total_out = out_q + out_k + out_v;
+    if (n >= total_out) return;
+    
+    device const float* x_row = x + m * in_features;
+    
+    if (n < out_q) {
+        // Q projection
+        float base_val = 0.0f;
+        for (uint k = 0; k < in_features; k++) {
+            base_val += x_row[k] * W_q[n * in_features + k];
+        }
+        
+        float lora_val = 0.0f;
+        for (uint r = 0; r < rank; r++) {
+            float xa = 0.0f;
+            for (uint k = 0; k < in_features; k++) {
+                xa += x_row[k] * A_q[r * in_features + k];
+            }
+            lora_val += xa * B_q[n * rank + r];
+        }
+        
+        Q[m * out_q + n] = base_val + scale * lora_val;
+        
+    } else if (n < out_q + out_k) {
+        // K projection
+        uint k_idx = n - out_q;
+        float base_val = 0.0f;
+        for (uint k = 0; k < in_features; k++) {
+            base_val += x_row[k] * W_k[k_idx * in_features + k];
+        }
+        
+        float lora_val = 0.0f;
+        for (uint r = 0; r < rank; r++) {
+            float xa = 0.0f;
+            for (uint k = 0; k < in_features; k++) {
+                xa += x_row[k] * A_k[r * in_features + k];
+            }
+            lora_val += xa * B_k[k_idx * rank + r];
+        }
+        
+        K[m * out_k + k_idx] = base_val + scale * lora_val;
+        
+    } else {
+        // V projection
+        uint v_idx = n - out_q - out_k;
+        float base_val = 0.0f;
+        for (uint k = 0; k < in_features; k++) {
+            base_val += x_row[k] * W_v[v_idx * in_features + k];
+        }
+        
+        float lora_val = 0.0f;
+        for (uint r = 0; r < rank; r++) {
+            float xa = 0.0f;
+            for (uint k = 0; k < in_features; k++) {
+                xa += x_row[k] * A_v[r * in_features + k];
+            }
+            lora_val += xa * B_v[v_idx * rank + r];
+        }
+        
+        V[m * out_v + v_idx] = base_val + scale * lora_val;
+    }
+}
+
+// =============================================================================
+// FUSED ADAMW ALL PARAMETERS
+// =============================================================================
+// Updates multiple parameter tensors in a single kernel dispatch.
+// Uses indirect buffer access - params packed sequentially.
+//
+// This reduces kernel launch overhead from N launches to 1.
+// For LoRA with 100+ small tensors, this is significant.
+
+kernel void adamw_step_multi(
+    device float* params [[buffer(0)]],           // All params concatenated
+    device const float* grads [[buffer(1)]],      // All grads concatenated
+    device float* exp_avg [[buffer(2)]],          // First moments
+    device float* exp_avg_sq [[buffer(3)]],       // Second moments
+    constant float& lr [[buffer(4)]],
+    constant float& beta1 [[buffer(5)]],
+    constant float& beta2 [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant float& weight_decay [[buffer(8)]],
+    constant float& bias_correction1 [[buffer(9)]],
+    constant float& bias_correction2 [[buffer(10)]],
+    constant uint& total_numel [[buffer(11)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= total_numel) return;
+    
+    float p = params[tid];
+    float g = grads[tid];
+    float m = exp_avg[tid];
+    float v = exp_avg_sq[tid];
+    
+    // AdamW update
+    m = beta1 * m + (1.0f - beta1) * g;
+    v = beta2 * v + (1.0f - beta2) * g * g;
+    
+    float m_hat = m / bias_correction1;
+    float v_hat = v / bias_correction2;
+    
+    // Weight decay (decoupled)
+    p = p - lr * weight_decay * p;
+    
+    // Adam update
+    p = p - lr * m_hat / (sqrt(v_hat) + eps);
+    
+    params[tid] = p;
+    exp_avg[tid] = m;
+    exp_avg_sq[tid] = v;
+}
+
+// BFloat16 KL Divergence
+kernel void kl_div_fwd_bfloat(
+    device const bfloat* log_p [[buffer(0)]],
+    device const bfloat* log_q [[buffer(1)]],
+    device float* loss [[buffer(2)]],
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& vocab_size [[buffer(4)]],
+    uint thread_idx [[thread_position_in_grid]],
+    uint group_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]
+) {
+     uint row = group_idx;
+     if (row >= batch_size) return;
+     
+     uint lane = tid_in_group;
+     float local_sum = 0.0f; // Renamed to local_sum to match reducer
+     
+     // Stride loop
+     for (uint i = lane; i < vocab_size; i += 256) {
+         uint idx = row * vocab_size + i;
+         float lp = float(log_p[idx]);
+         float lq = float(log_q[idx]);
+         float p = exp(lp);
+         local_sum += p * (lp - lq);
+     }
+     
+    // SIMD reduction
+    local_sum = simd_sum(local_sum);
+    
+    if (simd_lane == 0) {
+        shared[simd_group] = local_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    if (simd_group == 0) {
+        float group_sum = 0.0f;
+        if (simd_lane < 8) {
+            group_sum = shared[simd_lane];
+        }
+        group_sum = simd_sum(group_sum);
+        
+        if (simd_lane == 0) {
+            loss[row] = group_sum;
+        }
+    }
+}
+
+// BFloat16 Top-K KL Divergence
+kernel void kl_div_topk_fwd_bfloat(
+    device const bfloat* log_p [[buffer(0)]],
+    device const bfloat* log_q [[buffer(1)]],
+    device const int* topk_indices [[buffer(2)]],
+    device float* loss [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& vocab_size [[buffer(5)]],
+    constant int& k [[buffer(6)]],
+    uint thread_idx [[thread_position_in_grid]],
+    uint group_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]]
+) {
+    uint row = group_idx;
+    if (row >= batch_size) return;
+    
+    uint lane = tid_in_group;
+    float row_sum = 0.0f;
+    
+    // Stride loop over K
+    for (uint i = lane; i < k; i += 256) {
+        int idx_k = row * k + i;
+        int token_idx = topk_indices[idx_k];
+        int flat_idx = row * vocab_size + token_idx;
+        
+        float lp = float(log_p[flat_idx]);
+        float lq = float(log_q[flat_idx]);
+        
+        float p = exp(lp);
+        row_sum += p * (lp - lq);
+    }
+    
+    // SIMD reduction
+    float sum = simd_sum(row_sum);
+    
+    threadgroup float shared[8];
+    uint simd_id = lane / 32;
+    uint lane_id = lane % 32;
+    
+    if (lane_id == 0) shared[simd_id] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    if (lane < 8) {
+        sum = shared[lane];
+    } else {
+        sum = 0.0f;
+    }
+    
+    if (simd_id == 0) {
+        sum = simd_sum(sum);
+        if (lane == 0) loss[row] = sum;
+    }
+}
+
+// BFloat16 Cross Entropy
+kernel void cross_entropy_fwd_bfloat(
+    device const bfloat* logits [[buffer(0)]],
+    device const int* targets [[buffer(1)]],
+    device float* losses [[buffer(2)]],
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& vocab_size [[buffer(4)]],
+    uint thread_idx [[thread_position_in_grid]],
+    uint group_idx [[threadgroup_position_in_grid]],
+    uint tid_in_group [[thread_index_in_threadgroup]]
+) {
+    // 1 group per batch element
+    uint row = group_idx;
+    if (row >= batch_size) return;
+    
+    uint lane = tid_in_group;
+    
+    // 1. Find max for numerical stability
+    float local_max = -INFINITY;
+    for (uint i = lane; i < vocab_size; i += 256) {
+        float val = float(logits[row * vocab_size + i]);
+        local_max = max(local_max, val);
+    }
+    local_max = simd_max(local_max);
+    
+    threadgroup float shared_max[8];
+    uint simd_id = lane / 32;
+    uint lane_id = lane % 32;
+    
+    if (lane_id == 0) shared_max[simd_id] = local_max;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    if (lane < 8) local_max = shared_max[lane];
+    else local_max = -INFINITY;
+    
+    if (simd_id == 0) {
+        local_max = simd_max(local_max);
+        if (lane == 0) shared_max[0] = local_max;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float row_max = shared_max[0];
+    
+    // 2. Sum exp
+    float local_sum = 0.0f;
+    for (uint i = lane; i < vocab_size; i += 256) {
+        float val = float(logits[row * vocab_size + i]);
+        local_sum += exp(val - row_max);
+    }
+    local_sum = simd_sum(local_sum);
+    
+    threadgroup float shared_sum[8];
+    if (lane_id == 0) shared_sum[simd_id] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    if (lane < 8) local_sum = shared_sum[lane];
+    else local_sum = 0.0f;
+    
+    if (simd_id == 0) {
+        local_sum = simd_sum(local_sum);
+        if (lane == 0) shared_sum[0] = local_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float row_sum_exp = shared_sum[0];
+    
+    // 3. Final calculation: -log(softmax(target))
+    // = -log(exp(logit[target] - max) / sum_exp)
+    // = -(logit[target] - max - log(sum_exp))
+    // = -logit[target] + max + log(sum_exp)
+    if (lane == 0) {
+        int target_idx = targets[row];
+        float target_logit = float(logits[row * vocab_size + target_idx]);
+        losses[row] = -target_logit + row_max + log(row_sum_exp);
+    }
+}
+
+// FP16 split-half backward
+kernel void rope_bwd_split_half_half(
+    device const half* d_out [[buffer(0)]],
+    device const half* cos [[buffer(1)]],
+    device const half* sin [[buffer(2)]],
+    device half* d_qk [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& num_heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint d = gid.x;
+    uint h = gid.y;
+    uint bs = gid.z;
+    
+    uint half_dim = head_dim / 2;
+    if (d >= half_dim || h >= num_heads || bs >= batch_size * seq_len) return;
+    
+    uint b = bs / seq_len;
+    uint s = bs % seq_len;
+    
+    uint base = ((b * seq_len + s) * num_heads + h) * head_dim;
+    
+    float dy1 = float(d_out[base + d]);
+    float dy2 = float(d_out[base + half_dim + d]);
+    
+    uint cs_offset = s * half_dim + d;
+    float c = float(cos[cs_offset]);
+    float sn = float(sin[cs_offset]);
+    
+    d_qk[base + d] = half(dy1 * c + dy2 * sn);
+    d_qk[base + half_dim + d] = half(-dy1 * sn + dy2 * c);
+}
+
+// =============================================================================
+// SWIGLU BACKWARD
+// =============================================================================
+// d_h = grad_output (from down proj)
+// y = silu(gate) * up
+// d_up = d_h * silu(gate)
+// d_gate = d_h * up * (sigmoid(gate) * (1 + gate * (1 - sigmoid(gate))))
+
+kernel void swiglu_bwd_strided_float(
+    device const float* d_h [[buffer(0)]],
+    device const float* gate [[buffer(1)]],
+    device const float* up [[buffer(2)]],
+    device float* d_gate [[buffer(3)]],
+    device float* d_up [[buffer(4)]],
+    constant uint2& shape [[buffer(5)]],     // [rows, cols]
+    constant uint2& s_d_h [[buffer(6)]],     // strides
+    constant uint2& s_gate [[buffer(7)]],
+    constant uint2& s_up [[buffer(8)]],
+    constant uint2& s_d_gate [[buffer(9)]],
+    constant uint2& s_d_up [[buffer(10)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    if (row >= shape.x || col >= shape.y) return;
+    
+    // Calculate offsets
+    uint idx_dh = row * s_d_h.x + col * s_d_h.y;
+    uint idx_g  = row * s_gate.x + col * s_gate.y;
+    uint idx_u  = row * s_up.x + col * s_up.y;
+    uint idx_dg = row * s_d_gate.x + col * s_d_gate.y;
+    uint idx_du = row * s_d_up.x + col * s_d_up.y;
+    
+    float dh_val = d_h[idx_dh];
+    float g_val = gate[idx_g];
+    float u_val = up[idx_u];
+    
+    // SiLU and Sigmoid
+    float sig_g = 1.0f / (1.0f + exp(-g_val));
+    float silu_g = g_val * sig_g;
+    
+    // d_up
+    d_up[idx_du] = dh_val * silu_g;
+    
+    // d_gate
+    // d_silu = sig * (1 + g * (1 - sig))
+    float d_silu = sig_g * (1.0f + g_val * (1.0f - sig_g));
+    d_gate[idx_dg] = dh_val * u_val * d_silu;
+}
+
+kernel void swiglu_bwd_strided_half(
+    device const half* d_h [[buffer(0)]],
+    device const half* gate [[buffer(1)]],
+    device const half* up [[buffer(2)]],
+    device half* d_gate [[buffer(3)]],
+    device half* d_up [[buffer(4)]],
+    constant uint2& shape [[buffer(5)]],
+    constant uint2& s_d_h [[buffer(6)]],
+    constant uint2& s_gate [[buffer(7)]],
+    constant uint2& s_up [[buffer(8)]],
+    constant uint2& s_d_gate [[buffer(9)]],
+    constant uint2& s_d_up [[buffer(10)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    if (row >= shape.x || col >= shape.y) return;
+    
+    uint idx_dh = row * s_d_h.x + col * s_d_h.y;
+    uint idx_g  = row * s_gate.x + col * s_gate.y;
+    uint idx_u  = row * s_up.x + col * s_up.y;
+    uint idx_dg = row * s_d_gate.x + col * s_d_gate.y;
+    uint idx_du = row * s_d_up.x + col * s_d_up.y;
+    
+    float dh_val = float(d_h[idx_dh]);
+    float g_val = float(gate[idx_g]);
+    float u_val = float(up[idx_u]);
+    
+    float sig_g = 1.0f / (1.0f + exp(-g_val));
+    float silu_g = g_val * sig_g;
+    
+    d_up[idx_du] = half(dh_val * silu_g);
+    
+    float d_silu = sig_g * (1.0f + g_val * (1.0f - sig_g));
+    d_gate[idx_dg] = half(dh_val * u_val * d_silu);
+}
+
+kernel void swiglu_bwd_strided_bfloat(
+    device const bfloat* d_h [[buffer(0)]],
+    device const bfloat* gate [[buffer(1)]],
+    device const bfloat* up [[buffer(2)]],
+    device bfloat* d_gate [[buffer(3)]],
+    device bfloat* d_up [[buffer(4)]],
+    constant uint2& shape [[buffer(5)]],
+    constant uint2& s_d_h [[buffer(6)]],
+    constant uint2& s_gate [[buffer(7)]],
+    constant uint2& s_up [[buffer(8)]],
+    constant uint2& s_d_gate [[buffer(9)]],
+    constant uint2& s_d_up [[buffer(10)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    
+    if (row >= shape.x || col >= shape.y) return;
+    
+    uint idx_dh = row * s_d_h.x + col * s_d_h.y;
+    uint idx_g  = row * s_gate.x + col * s_gate.y;
+    uint idx_u  = row * s_up.x + col * s_up.y;
+    uint idx_dg = row * s_d_gate.x + col * s_d_gate.y;
+    uint idx_du = row * s_d_up.x + col * s_d_up.y;
+    
+    float dh_val = float(d_h[idx_dh]);
+    float g_val = float(gate[idx_g]);
+    float u_val = float(up[idx_u]);
+    
+    float sig_g = 1.0f / (1.0f + exp(-g_val));
+    float silu_g = g_val * sig_g;
+    
+    d_up[idx_du] = bfloat(dh_val * silu_g);
+    
+    float d_silu = sig_g * (1.0f + g_val * (1.0f - sig_g));
+    d_gate[idx_dg] = bfloat(dh_val * u_val * d_silu);
 }

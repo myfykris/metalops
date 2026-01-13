@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 # Configuration for metalcore
 
 # If True, single matrix QR will fall back to CPU execution

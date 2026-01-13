@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 """
 metalcore: Foundational Metal Linear Algebra Primitives
 
@@ -26,15 +29,22 @@ from .svd import svd
 from .eigh import eigh
 from .rmsnorm import RMSNormFunction, MetalRMSNorm, fused_add_rmsnorm, FusedAddRMSNorm
 from .optim import MetalAdamW
-from .activations import metal_gelu, metal_silu, MetalGELU, MetalSiLU
+from .activations import metal_gelu, metal_silu, MetalGELU, MetalSiLU, bias_gelu, bias_silu
 from .sdpa import metal_scaled_dot_product_attention
 from .comfy_patch import patch_comfy, unpatch_comfy, is_patched
-from .overrides import enable_pytorch_overrides, disable_pytorch_overrides, get_active_overrides, patch_transformers_rmsnorm
+from .overrides import enable_pytorch_overrides, disable_pytorch_overrides, get_active_overrides, patch_transformers_rmsnorm, patch_transformers_rope
+from .rope import apply_rotary_pos_emb, apply_rotary_pos_emb_single, RotaryEmbedding, rope_forward
+from .quantization import quantize_int4, dequantize_int4, matmul_int4, Int4Linear, matmul_int8
+from .quantization import quantize_ggml_q4_0, dequantize_ggml_q4_0, matmul_ggml_q4_0
 from .ops import (
     fused_softmax, MetalSoftmax,
-    layer_norm, MetalLayerNorm,
+    layer_norm, MetalLayerNorm, fused_add_layernorm,
     embedding_bag, MetalEmbeddingBag,
-    gather, scatter_add, index_select
+    gather, scatter_add, index_select,
+    fused_swiglu_mlp,
+    fused_attention_bwd,
+    swiglu_bwd,
+    fused_mlp_bwd
 )
 
 # High-impact ops (direct backend exports)
@@ -99,7 +109,7 @@ def is_slow_metal_sdpa_enabled():
     """Check if (slow) Metal SDPA is currently enabled."""
     return _sdpa_enabled
 
-__version__ = "0.1.13"
+__version__ = "0.1.14"
 __all__ = [
     "trsm",
     "trsm_batched", 
@@ -139,14 +149,39 @@ __all__ = [
     "MetalSoftmax",
     "layer_norm",
     "MetalLayerNorm",
+    "fused_add_layernorm",
     "embedding_bag",
     "MetalEmbeddingBag",
     "gather",
     "scatter_add",
     "index_select",
+    "fused_swiglu_mlp",
+    "fused_attention_bwd",
+    "swiglu_bwd",
+    "fused_mlp_bwd",
     # PyTorch Override System
     "enable_pytorch_overrides",
     "disable_pytorch_overrides",
     "get_active_overrides",
     "patch_transformers_rmsnorm",
+    "patch_transformers_rope",
+    # RoPE (Rotary Position Embedding)
+    "apply_rotary_pos_emb",
+    "apply_rotary_pos_emb_single",
+    "RotaryEmbedding",
+    "rope_forward",
+    # INT4 Quantization
+    "quantize_int4",
+    "dequantize_int4",
+    "matmul_int4",
+    "Int4Linear",
+    # INT8 Quantization
+    "matmul_int8",
+    # GGML Quantization (llama.cpp compatible)
+    "quantize_ggml_q4_0",
+    "dequantize_ggml_q4_0",
+    "matmul_ggml_q4_0",
+    # Fused Bias + Activations
+    "bias_gelu",
+    "bias_silu",
 ]

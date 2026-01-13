@@ -9,31 +9,31 @@ echo "=== Building Wheels for MetalOps ==="
 # Clean previous builds
 rm -rf dist build packages/metalcore/build packages/metalcore/dist packages/metalcore/metalcore.egg-info
 
-# Find all .venv directories dynamically
-environments=($(find . -maxdepth 1 -type d -name ".venv*" -exec basename {} \; | sort))
+# Use every directory in envs/ as a venv (includes hidden .venv* dirs)
+environments=($(ls -a envs/ | grep -E '^\.' | grep -v '^\.\.$' | grep -v '^\.$'))
 
 echo "Found environments: ${environments[*]}"
 
 # First pass: uninstall metalcore from all venvs
 echo "=== Uninstalling metalcore from all venvs ==="
 for env in "${environments[@]}"; do
-    if [ -f "./$env/bin/python" ]; then
-        py_ver=$(./$env/bin/python --version)
+    if [ -f "./envs/$env/bin/python" ]; then
+        py_ver=$(./envs/$env/bin/python --version)
         echo "Uninstalling metalcore from $env ($py_ver)..."
-        ./$env/bin/pip uninstall metalcore -y 2>/dev/null || true
+        ./envs/$env/bin/pip uninstall metalcore -y 2>/dev/null || true
     fi
 done
 
 # Second pass: build wheels and run benchmarks
 echo "=== Building wheels and running benchmarks ==="
 for env in "${environments[@]}"; do
-    if [ -f "./$env/bin/python" ]; then
-        py_ver=$(./$env/bin/python --version)
+    if [ -f "./envs/$env/bin/python" ]; then
+        py_ver=$(./envs/$env/bin/python --version)
         echo "================================================"
         echo "Building for $env ($py_ver)..."
         echo "================================================"
         
-        abs_python=$(realpath ./$env/bin/python)
+        abs_python=$(realpath ./envs/$env/bin/python)
         
         # Install dependencies
         echo "Installing dependencies..."
@@ -51,13 +51,7 @@ for env in "${environments[@]}"; do
         
         # Run lite benchmark (no long ops)
         echo "Running lite benchmark for $env..."
-        if [ "$env" = ".venv" ]; then
-            # For .venv (Python 3.14), run with file write enabled
-            $abs_python benchmark.py --lite --nolongops
-        else
-            # For other versions, skip file write (already --lite does this)
-            $abs_python benchmark.py --lite --nolongops
-        fi
+        $abs_python benchmark.py --lite --nolongops
         
         echo "✅ Benchmark passed for $env"
         

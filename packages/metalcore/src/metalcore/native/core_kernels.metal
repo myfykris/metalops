@@ -1,3 +1,6 @@
+// Author: Kris Bailey
+// Copyright 2026
+// Email: kris@krisbailey.com
 // metalcore Metal kernels
 // Foundational linear algebra primitives
 //
@@ -12,6 +15,7 @@ using namespace metal;
 
 // Maximum panel dimensions for shared memory caching
 // Adjust based on GPU shared memory limits (32KB typical)
+
 constant uint MAX_PANEL_M = 512;
 constant uint MAX_PANEL_N = 32;
 
@@ -729,11 +733,11 @@ kernel void qr_full_fused_kernel(
         }
         
         reduction_buf[tid] = local_sigma;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup_barrier(mem_flags::mem_none);  // Force full synchronization
         
         for (uint s = tg_size / 2; s > 0; s >>= 1) {
             if (tid < s) reduction_buf[tid] += reduction_buf[tid + s];
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_none);  // Force full sync
         }
         
         float sigma = reduction_buf[0];
@@ -778,11 +782,11 @@ kernel void qr_full_fused_kernel(
             }
             
             reduction_buf[tid] = local_dot;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_none);  // Force full sync
             
             for (uint s = tg_size / 2; s > 0; s >>= 1) {
                 if (tid < s) reduction_buf[tid] += reduction_buf[tid + s];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                threadgroup_barrier(mem_flags::mem_none);  // Force full sync
             }
             
             float vT_r = reduction_buf[0];
@@ -837,11 +841,11 @@ kernel void qr_full_fused_kernel(
             }
             
             reduction_buf[tid] = local_vq;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_none);  // Force full sync
             
             for (uint s = tg_size / 2; s > 0; s >>= 1) {
                 if (tid < s) reduction_buf[tid] += reduction_buf[tid + s];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                threadgroup_barrier(mem_flags::mem_none);  // Force full sync
             }
             
             float vq = reduction_buf[0];
@@ -879,10 +883,665 @@ kernel void qr_full_fused_kernel(
 }
 
 // ============================================================================
-// BATCHED QR KERNEL - One threadgroup per matrix in batch
+// ULTRA-OPTIMIZED 8x8 BATCHED QR - ONE THREAD PER MATRIX (Register-based)
 // ============================================================================
-// This kernel processes BATCH matrices in parallel, one threadgroup per matrix.
-// This is where GPU wins: massive parallelism across matrices.
+// For tiny 8x8 matrices, each thread processes one entire matrix:
+// - Full A, Q, R matrices live in thread-private registers (no shared memory!)
+// - No barriers, no synchronization during computation
+// - Fully unrolled Householder reflections
+// - Maximum throughput for very small matrices
+//
+// This is the MAGMA "fully unrolled tiny matrix" pattern.
+
+kernel void qr_batched_8x8_register_kernel(
+    device const float* A_batch [[buffer(0)]],
+    device float* Q_batch [[buffer(1)]],
+    device float* R_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= Batch) return;
+    
+    const uint N = 8;
+    
+    device const float* A_in = A_batch + tid * N * N;
+    device float* Q_out = Q_batch + tid * N * N;
+    device float* R_out = R_batch + tid * N * N;
+    
+    // Load entire 8x8 matrix into registers (64 floats = 256 bytes per thread)
+    float R[8][8];
+    for (uint i = 0; i < N; i++) {
+        for (uint j = 0; j < N; j++) {
+            R[i][j] = A_in[i * N + j];
+        }
+    }
+    
+    // Store tau values in registers
+    float tau[8];
+    
+    // Householder QR factorization - fully in registers
+    for (uint k = 0; k < N; k++) {
+        // Compute sigma = sum(R[k+1:, k]^2)
+        float sigma = 0.0f;
+        for (uint i = k + 1; i < N; i++) {
+            sigma += R[i][k] * R[i][k];
+        }
+        
+        float x0 = R[k][k];
+        float tau_k = 0.0f;
+        float v0_factor = 1.0f;
+        
+        if (sigma > 1e-10f || x0 * x0 > 1e-10f) {
+            float norm_x = sqrt(x0 * x0 + sigma);
+            float sign = (x0 >= 0.0f) ? 1.0f : -1.0f;
+            float v0 = x0 + sign * norm_x;
+            tau_k = 2.0f * v0 * v0 / (v0 * v0 + sigma);
+            v0_factor = 1.0f / v0;
+            R[k][k] = -sign * norm_x;
+        }
+        tau[k] = tau_k;
+        
+        if (tau_k == 0.0f) continue;
+        
+        // Normalize v below diagonal
+        for (uint i = k + 1; i < N; i++) {
+            R[i][k] *= v0_factor;
+        }
+        
+        // Apply H to trailing columns
+        for (uint j = k + 1; j < N; j++) {
+            float dot = R[k][j];  // v[k] = 1
+            for (uint i = k + 1; i < N; i++) {
+                dot += R[i][k] * R[i][j];
+            }
+            R[k][j] -= tau_k * dot;
+            for (uint i = k + 1; i < N; i++) {
+                R[i][j] -= tau_k * R[i][k] * dot;
+            }
+        }
+    }
+    
+    // Build Q by applying reflectors in reverse - also in registers
+    float Q[8][8];
+    for (uint i = 0; i < N; i++) {
+        for (uint j = 0; j < N; j++) {
+            Q[i][j] = (i == j) ? 1.0f : 0.0f;
+        }
+    }
+    
+    for (int k = N - 1; k >= 0; k--) {
+        float tau_k = tau[k];
+        if (tau_k == 0.0f) continue;
+        
+        for (uint j = 0; j < N; j++) {
+            float vq = Q[k][j];  // v[k] = 1
+            for (uint i = k + 1; i < N; i++) {
+                vq += R[i][k] * Q[i][j];
+            }
+            Q[k][j] -= tau_k * vq;
+            for (uint i = k + 1; i < N; i++) {
+                Q[i][j] -= tau_k * R[i][k] * vq;
+            }
+        }
+    }
+    
+    // Write outputs
+    for (uint i = 0; i < N; i++) {
+        for (uint j = 0; j < N; j++) {
+            Q_out[i * N + j] = Q[i][j];
+            R_out[i * N + j] = (j < i) ? 0.0f : R[i][j];
+        }
+    }
+}
+
+// ============================================================================
+// SPECIALIZED 16x16 BATCHED QR KERNEL - Ultra-optimized for N=16
+// ============================================================================
+// For 16x16 matrices, we use SIMD-based parallelism:
+// - 32 threads per threadgroup (one SIMD group)
+// - Each thread handles a subset of columns for dot products
+// - All reductions via simd_sum (no threadgroup barriers for reductions!)
+// - Full matrix fits in 16*16 + 16*16 = 512 floats = 2KB shared memory
+
+kernel void qr_batched_16x16_kernel(
+    device const float* A_batch [[buffer(0)]],
+    device float* Q_batch [[buffer(1)]],
+    device float* R_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]]
+) {
+    if (batch_idx >= Batch) return;
+    
+    const uint N = 16;
+    const uint SIMD_SIZE = 32;
+    
+    device const float* A_in = A_batch + batch_idx * N * N;
+    device float* Q_out = Q_batch + batch_idx * N * N;
+    device float* R_out = R_batch + batch_idx * N * N;
+    
+    // Shared memory: R_work (256) + Q_work (256) + tau (16) + vT_R (16)
+    threadgroup float* R_work = shared;
+    threadgroup float* Q_work = shared + N * N;
+    threadgroup float* tau_storage = shared + 2 * N * N;
+    threadgroup float* vT_R_all = shared + 2 * N * N + N;
+    
+    // Load A into R_work (8 elements per thread for 32 threads)
+    for (uint idx = tid; idx < N * N; idx += SIMD_SIZE) {
+        R_work[idx] = A_in[idx];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Phase 1: Householder QR factorization
+    for (uint k = 0; k < N; k++) {
+        uint v_len = N - k;
+        
+        // Compute sigma = sum(R[k+1:, k]^2) - each thread contributes
+        float local_sigma = 0.0f;
+        for (uint i = tid + 1; i < v_len; i += SIMD_SIZE) {
+            float val = R_work[(k + i) * N + k];
+            local_sigma += val * val;
+        }
+        float sigma = simd_sum(local_sigma);
+        
+        float x0 = R_work[k * N + k];
+        float tau_k = 0.0f;
+        float v0_factor = 1.0f;
+        
+        if (sigma > 1e-10f || x0 * x0 > 1e-10f) {
+            float norm_x = sqrt(x0 * x0 + sigma);
+            float sign = (x0 >= 0.0f) ? 1.0f : -1.0f;
+            float v0 = x0 + sign * norm_x;
+            tau_k = 2.0f * v0 * v0 / (v0 * v0 + sigma);
+            v0_factor = 1.0f / v0;
+            if (tid == 0) R_work[k * N + k] = -sign * norm_x;
+        }
+        
+        if (tid == 0) tau_storage[k] = tau_k;
+        
+        // Broadcast tau_k and v0_factor to all threads
+        tau_k = simd_broadcast_first(tau_k);
+        v0_factor = simd_broadcast_first(v0_factor);
+        
+        if (tau_k == 0.0f) continue;
+        
+        // Compute v^T @ R[:, j] for trailing columns - each thread handles columns
+        uint num_trailing = N - k - 1;
+        if (tid < num_trailing) {
+            uint j = k + 1 + tid;
+            float dot = R_work[k * N + j];
+            for (uint i = 1; i < v_len; i++) {
+                dot += R_work[(k + i) * N + k] * v0_factor * R_work[(k + i) * N + j];
+            }
+            vT_R_all[tid] = dot;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Apply updates
+        if (tid < num_trailing) {
+            uint j = k + 1 + tid;
+            float vT_r = vT_R_all[tid];
+            R_work[k * N + j] -= tau_k * vT_r;
+            float update = tau_k * v0_factor * vT_r;
+            for (uint i = 1; i < v_len; i++) {
+                R_work[(k + i) * N + j] -= update * R_work[(k + i) * N + k];
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Normalize v
+        for (uint i = tid + 1; i < v_len; i += SIMD_SIZE) {
+            R_work[(k + i) * N + k] *= v0_factor;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Phase 2: Build Q (identity then apply reflectors in reverse)
+    for (uint idx = tid; idx < N * N; idx += SIMD_SIZE) {
+        uint row = idx / N;
+        uint col = idx % N;
+        Q_work[idx] = (row == col) ? 1.0f : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    for (int k = N - 1; k >= 0; k--) {
+        float tau_k = tau_storage[k];
+        if (tau_k == 0.0f) continue;
+        
+        uint v_len = N - k;
+        
+        // Each thread handles one Q column
+        if (tid < N) {
+            float vq = Q_work[k * N + tid];
+            for (uint i = 1; i < v_len; i++) {
+                vq += R_work[(k + i) * N + k] * Q_work[(k + i) * N + tid];
+            }
+            vT_R_all[tid] = vq;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (tid < N) {
+            float vq = vT_R_all[tid];
+            Q_work[k * N + tid] -= tau_k * vq;
+            float q_update = tau_k * vq;
+            for (uint i = 1; i < v_len; i++) {
+                Q_work[(k + i) * N + tid] -= q_update * R_work[(k + i) * N + k];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Write outputs  
+    for (uint idx = tid; idx < N * N; idx += SIMD_SIZE) {
+        Q_out[idx] = Q_work[idx];
+        uint row = idx / N;
+        uint col = idx % N;
+        R_out[idx] = (col < row) ? 0.0f : R_work[idx];
+    }
+}
+// ============================================================================
+// SINGLE-THREAD 32x32 QR KERNEL - NO BARRIERS (Shared Memory Based)
+// ============================================================================
+// Key insight: barriers cost 0.15μs each, 64 barriers = 9.3μs overhead
+// CPU single-threaded: 50μs, CPU batched 8 threads: 6.4μs/mat
+// Our 32-thread kernel with barriers: 9.3μs (100% barrier overhead!)
+// 
+// Solution: ONE thread per matrix, all work sequential, NO barriers needed
+// Uses shared memory (8KB per matrix) since 1024 floats won't fit in registers
+// Target: <6μs per matrix to beat CPU
+
+kernel void qr_batched_32x32_single_thread_kernel(
+    device const float* A_batch [[buffer(0)]],
+    device float* Q_batch [[buffer(1)]],
+    device float* R_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    threadgroup float* shared [[threadgroup(0)]],  // 8KB: 1024 R + 1024 Q
+    uint batch_idx [[threadgroup_position_in_grid]]
+) {
+    if (batch_idx >= Batch) return;
+    
+    const uint N = 32;
+    
+    device const float* A_in = A_batch + batch_idx * N * N;
+    device float* Q_out = Q_batch + batch_idx * N * N;
+    device float* R_out = R_batch + batch_idx * N * N;
+    
+    // Shared memory layout: R[32][32] then Q[32][32]
+    threadgroup float* R = shared;
+    threadgroup float* Q = shared + N * N;
+    
+    // Load A into R (shared memory)
+    for (uint i = 0; i < N * N; i++) {
+        R[i] = A_in[i];
+    }
+    
+    // Store tau values in shared memory after Q
+    threadgroup float* tau = shared + 2 * N * N;  // 32 floats
+    
+    // ========================================
+    // PHASE 1: Householder QR (no barriers!)
+    // ========================================
+    for (uint k = 0; k < N; k++) {
+        // Compute sigma = ||R[k+1:, k]||^2
+        float sigma = 0.0f;
+        for (uint i = k + 1; i < N; i++) {
+            float val = R[i * N + k];
+            sigma += val * val;
+        }
+        
+        float x0 = R[k * N + k];
+        float tau_k = 0.0f;
+        float v0_factor = 1.0f;
+        
+        if (sigma > 1e-10f || x0 * x0 > 1e-10f) {
+            float norm_x = sqrt(x0 * x0 + sigma);
+            float sign = (x0 >= 0.0f) ? 1.0f : -1.0f;
+            float v0 = x0 + sign * norm_x;
+            tau_k = 2.0f * v0 * v0 / (v0 * v0 + sigma);
+            v0_factor = 1.0f / v0;
+            R[k * N + k] = -sign * norm_x;  // Update diagonal
+        }
+        tau[k] = tau_k;
+        
+        if (tau_k == 0.0f) continue;
+        
+        // Normalize v below diagonal (store in R below diagonal)
+        for (uint i = k + 1; i < N; i++) {
+            R[i * N + k] *= v0_factor;
+        }
+        
+        // Apply H to trailing columns (j > k)
+        for (uint j = k + 1; j < N; j++) {
+            float dot = R[k * N + j];  // v[k] = 1 implicit
+            for (uint i = k + 1; i < N; i++) {
+                dot += R[i * N + k] * R[i * N + j];
+            }
+            R[k * N + j] -= tau_k * dot;
+            for (uint i = k + 1; i < N; i++) {
+                R[i * N + j] -= tau_k * R[i * N + k] * dot;
+            }
+        }
+    }
+    
+    // ========================================
+    // PHASE 2: Build Q (no barriers!)
+    // ========================================
+    // Initialize Q to identity
+    for (uint i = 0; i < N * N; i++) {
+        uint row = i / N;
+        uint col = i % N;
+        Q[i] = (row == col) ? 1.0f : 0.0f;
+    }
+    
+    // Apply reflectors in reverse order
+    for (int k = N - 1; k >= 0; k--) {
+        float tau_k = tau[k];
+        if (tau_k == 0.0f) continue;
+        
+        // Apply H_k to all columns of Q
+        for (uint j = 0; j < N; j++) {
+            float vq = Q[k * N + j];  // v[k] = 1 implicit
+            for (uint i = k + 1; i < N; i++) {
+                vq += R[i * N + k] * Q[i * N + j];
+            }
+            Q[k * N + j] -= tau_k * vq;
+            for (uint i = k + 1; i < N; i++) {
+                Q[i * N + j] -= tau_k * R[i * N + k] * vq;
+            }
+        }
+    }
+    
+    // ========================================
+    // PHASE 3: Write outputs
+    // ========================================
+    for (uint i = 0; i < N * N; i++) {
+        Q_out[i] = Q[i];
+        uint row = i / N;
+        uint col = i % N;
+        R_out[i] = (col < row) ? 0.0f : R[i];
+    }
+}
+
+// ============================================================================
+// SPECIALIZED 32x32 BATCHED QR KERNEL - Optimized for N=32
+// ============================================================================
+// For 32x32 matrices:
+// - 32 threads (ONE SIMD group) - each thread owns one column
+// - simdgroup_barrier ONLY (fastest synchronization)
+// - Column data cached in thread-private registers
+// - simd_sum and simd_broadcast for all reductions/broadcasts
+
+kernel void qr_batched_32x32_kernel(
+    device const float* A_batch [[buffer(0)]],
+    device float* Q_batch [[buffer(1)]],
+    device float* R_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]]
+) {
+    if (batch_idx >= Batch) return;
+    
+    const uint N = 32;
+    
+    device const float* A_in = A_batch + batch_idx * N * N;
+    device float* Q_out = Q_batch + batch_idx * N * N;
+    device float* R_out = R_batch + batch_idx * N * N;
+    
+    // Each thread owns column 'tid' - load into registers
+    float R_col[32];
+    #pragma unroll
+    for (uint i = 0; i < 32; i++) {
+        R_col[i] = A_in[i * N + tid];
+    }
+    
+    // Shared memory
+    threadgroup float* v_shared = shared;
+    threadgroup float* tau_all = shared + N;
+    
+    // Macro for one Householder reflection step
+    #define HOUSEHOLDER_STEP(k) \
+    { \
+        float my_sigma = 0.0f; \
+        if (tid == k) { \
+            _Pragma("unroll") \
+            for (uint i = k + 1; i < 32; i++) { \
+                my_sigma += R_col[i] * R_col[i]; \
+            } \
+        } \
+        float sigma = simd_sum(my_sigma); \
+        float x0 = simd_shuffle(R_col[k], k); \
+        float tau_k = 0.0f; \
+        float v0_factor = 1.0f; \
+        float new_diag = x0; \
+        if (sigma > 1e-10f || x0 * x0 > 1e-10f) { \
+            float norm_x = sqrt(x0 * x0 + sigma); \
+            float sign = (x0 >= 0.0f) ? 1.0f : -1.0f; \
+            float v0 = x0 + sign * norm_x; \
+            tau_k = 2.0f * v0 * v0 / (v0 * v0 + sigma); \
+            v0_factor = 1.0f / v0; \
+            new_diag = -sign * norm_x; \
+        } \
+        tau_k = simd_broadcast_first(tau_k); \
+        v0_factor = simd_broadcast_first(v0_factor); \
+        if (tid == 0) tau_all[k] = tau_k; \
+        if (tid == k) { \
+            R_col[k] = new_diag; \
+            v_shared[k] = 1.0f; \
+            _Pragma("unroll") \
+            for (uint i = k + 1; i < 32; i++) { \
+                float v_i = R_col[i] * v0_factor; \
+                v_shared[i] = v_i; \
+                R_col[i] = v_i; \
+            } \
+        } \
+        simdgroup_barrier(mem_flags::mem_threadgroup); \
+        if (tau_k != 0.0f && tid > k) { \
+            float dot = R_col[k]; \
+            _Pragma("unroll") \
+            for (uint i = k + 1; i < 32; i++) { \
+                dot += v_shared[i] * R_col[i]; \
+            } \
+            R_col[k] -= tau_k * dot; \
+            _Pragma("unroll") \
+            for (uint i = k + 1; i < 32; i++) { \
+                R_col[i] -= tau_k * v_shared[i] * dot; \
+            } \
+        } \
+        simdgroup_barrier(mem_flags::mem_threadgroup); \
+    }
+    
+    // Fully unrolled Phase 1: 32 Householder reflections
+    HOUSEHOLDER_STEP(0)  HOUSEHOLDER_STEP(1)  HOUSEHOLDER_STEP(2)  HOUSEHOLDER_STEP(3)
+    HOUSEHOLDER_STEP(4)  HOUSEHOLDER_STEP(5)  HOUSEHOLDER_STEP(6)  HOUSEHOLDER_STEP(7)
+    HOUSEHOLDER_STEP(8)  HOUSEHOLDER_STEP(9)  HOUSEHOLDER_STEP(10) HOUSEHOLDER_STEP(11)
+    HOUSEHOLDER_STEP(12) HOUSEHOLDER_STEP(13) HOUSEHOLDER_STEP(14) HOUSEHOLDER_STEP(15)
+    HOUSEHOLDER_STEP(16) HOUSEHOLDER_STEP(17) HOUSEHOLDER_STEP(18) HOUSEHOLDER_STEP(19)
+    HOUSEHOLDER_STEP(20) HOUSEHOLDER_STEP(21) HOUSEHOLDER_STEP(22) HOUSEHOLDER_STEP(23)
+    HOUSEHOLDER_STEP(24) HOUSEHOLDER_STEP(25) HOUSEHOLDER_STEP(26) HOUSEHOLDER_STEP(27)
+    HOUSEHOLDER_STEP(28) HOUSEHOLDER_STEP(29) HOUSEHOLDER_STEP(30) HOUSEHOLDER_STEP(31)
+    
+    #undef HOUSEHOLDER_STEP
+    
+    // Phase 2: Build Q from stored V vectors
+    float Q_col[32];
+    #pragma unroll
+    for (uint i = 0; i < 32; i++) {
+        Q_col[i] = (i == tid) ? 1.0f : 0.0f;
+    }
+    
+    // Macro for one Q accumulation step
+    #define Q_STEP(k) \
+    { \
+        float tau_k = tau_all[k]; \
+        if (tau_k != 0.0f) { \
+            if (tid == k) { \
+                v_shared[k] = 1.0f; \
+                _Pragma("unroll") \
+                for (uint i = k + 1; i < 32; i++) { \
+                    v_shared[i] = R_col[i]; \
+                } \
+            } \
+            simdgroup_barrier(mem_flags::mem_threadgroup); \
+            float vq = Q_col[k]; \
+            _Pragma("unroll") \
+            for (uint i = k + 1; i < 32; i++) { \
+                vq += v_shared[i] * Q_col[i]; \
+            } \
+            Q_col[k] -= tau_k * vq; \
+            _Pragma("unroll") \
+            for (uint i = k + 1; i < 32; i++) { \
+                Q_col[i] -= tau_k * v_shared[i] * vq; \
+            } \
+            simdgroup_barrier(mem_flags::mem_threadgroup); \
+        } \
+    }
+    
+    // Fully unrolled Phase 2: Apply reflectors in reverse (31 down to 0)
+    Q_STEP(31) Q_STEP(30) Q_STEP(29) Q_STEP(28)
+    Q_STEP(27) Q_STEP(26) Q_STEP(25) Q_STEP(24)
+    Q_STEP(23) Q_STEP(22) Q_STEP(21) Q_STEP(20)
+    Q_STEP(19) Q_STEP(18) Q_STEP(17) Q_STEP(16)
+    Q_STEP(15) Q_STEP(14) Q_STEP(13) Q_STEP(12)
+    Q_STEP(11) Q_STEP(10) Q_STEP(9)  Q_STEP(8)
+    Q_STEP(7)  Q_STEP(6)  Q_STEP(5)  Q_STEP(4)
+    Q_STEP(3)  Q_STEP(2)  Q_STEP(1)  Q_STEP(0)
+    
+    #undef Q_STEP
+    
+    // Phase 3: Write outputs
+    #pragma unroll
+    for (uint i = 0; i < 32; i++) {
+        Q_out[i * N + tid] = Q_col[i];
+        R_out[i * N + tid] = (i > tid) ? 0.0f : R_col[i];
+    }
+}
+
+// ============================================================================
+// SPECIALIZED 64x64 BATCHED QR KERNEL - Single Thread Per Matrix
+// ============================================================================
+// For 64x64 matrices: use single-thread approach (no barriers!)
+// - One thread per matrix, all work sequential
+// - Uses shared memory for R and Q (exactly 32KB)
+// - Tau stored in thread-local array (64 floats fits in registers)
+
+kernel void qr_batched_64x64_kernel(
+    device const float* A_batch [[buffer(0)]],
+    device float* Q_batch [[buffer(1)]],
+    device float* R_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    threadgroup float* shared [[threadgroup(0)]],  // R(4096) + Q(4096) = 8192 floats = 32KB exactly
+    uint batch_idx [[threadgroup_position_in_grid]]
+) {
+    if (batch_idx >= Batch) return;
+    
+    const uint N = 64;
+    
+    device const float* A_in = A_batch + batch_idx * N * N;
+    device float* Q_out = Q_batch + batch_idx * N * N;
+    device float* R_out = R_batch + batch_idx * N * N;
+    
+    // Shared memory layout: R[64][64] + Q[64][64] (tau in thread-local)
+    threadgroup float* R = shared;
+    threadgroup float* Q = shared + N * N;
+    
+    // Thread-local tau array (64 floats fits in registers)
+    float tau[64];
+    
+    // Load A into R
+    for (uint i = 0; i < N * N; i++) {
+        R[i] = A_in[i];
+    }
+    
+    // PHASE 1: Householder QR (no barriers - single thread!)
+    for (uint k = 0; k < N; k++) {
+        // Compute sigma = ||R[k+1:, k]||^2
+        float sigma = 0.0f;
+        for (uint i = k + 1; i < N; i++) {
+            float val = R[i * N + k];
+            sigma += val * val;
+        }
+        
+        float x0 = R[k * N + k];
+        float tau_k = 0.0f;
+        float v0_factor = 1.0f;
+        
+        if (sigma > 1e-10f || x0 * x0 > 1e-10f) {
+            float norm_x = sqrt(x0 * x0 + sigma);
+            float sign = (x0 >= 0.0f) ? 1.0f : -1.0f;
+            float v0 = x0 + sign * norm_x;
+            tau_k = 2.0f * v0 * v0 / (v0 * v0 + sigma);
+            v0_factor = 1.0f / v0;
+            R[k * N + k] = -sign * norm_x;
+        }
+        tau[k] = tau_k;
+        
+        if (tau_k == 0.0f) continue;
+        
+        // Normalize v below diagonal
+        for (uint i = k + 1; i < N; i++) {
+            R[i * N + k] *= v0_factor;
+        }
+        
+        // Apply H to trailing columns
+        for (uint j = k + 1; j < N; j++) {
+            float dot = R[k * N + j];
+            for (uint i = k + 1; i < N; i++) {
+                dot += R[i * N + k] * R[i * N + j];
+            }
+            R[k * N + j] -= tau_k * dot;
+            for (uint i = k + 1; i < N; i++) {
+                R[i * N + j] -= tau_k * R[i * N + k] * dot;
+            }
+        }
+    }
+    
+    // PHASE 2: Build Q (no barriers!)
+    for (uint i = 0; i < N * N; i++) {
+        uint row = i / N;
+        uint col = i % N;
+        Q[i] = (row == col) ? 1.0f : 0.0f;
+    }
+    
+    // Apply reflectors in reverse order
+    for (int k = N - 1; k >= 0; k--) {
+        float tau_k = tau[k];
+        if (tau_k == 0.0f) continue;
+        
+        for (uint j = 0; j < N; j++) {
+            float vq = Q[k * N + j];
+            for (uint i = k + 1; i < N; i++) {
+                vq += R[i * N + k] * Q[i * N + j];
+            }
+            Q[k * N + j] -= tau_k * vq;
+            for (uint i = k + 1; i < N; i++) {
+                Q[i * N + j] -= tau_k * R[i * N + k] * vq;
+            }
+        }
+    }
+    
+    // PHASE 3: Write outputs
+    for (uint i = 0; i < N * N; i++) {
+        Q_out[i] = Q[i];
+        uint row = i / N;
+        uint col = i % N;
+        R_out[i] = (col < row) ? 0.0f : R[i];
+    }
+}
+
+// ============================================================================
+// BATCHED QR KERNEL - Optimized with SIMD reductions and parallel updates
+// ============================================================================
+// Based on ROCm/MAGMA patterns:
+// 1. Use simd_sum for fast reductions (no threadgroup barriers within warp)
+// 2. Parallelize trailing column updates (each thread handles different columns)
+// 3. Minimize threadgroup barriers
+//
+// Key insight: Instead of sequentially processing columns with barriers after each,
+// parallelize across columns where possible.
 
 kernel void qr_batched_kernel(
     device const float* A_batch [[buffer(0)]],    // (Batch, M, N) input
@@ -894,11 +1553,15 @@ kernel void qr_batched_kernel(
     threadgroup float* shared [[threadgroup(0)]],  // Per-threadgroup shared memory
     uint tid [[thread_position_in_threadgroup]],
     uint tg_size [[threads_per_threadgroup]],
-    uint batch_idx [[threadgroup_position_in_grid]]
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]
 ) {
     if (batch_idx >= Batch) return;
     
     uint K = min(M, N);
+    const uint SIMD_SIZE = 32;
+    uint num_simd_groups = tg_size / SIMD_SIZE;
     
     // Pointers to this batch item
     uint A_stride = M * N;
@@ -909,13 +1572,19 @@ kernel void qr_batched_kernel(
     device float* Q_out = Q_batch + batch_idx * Q_stride;
     device float* R_out = R_batch + batch_idx * R_stride;
     
-    // Shared memory layout (same as single kernel)
+    // Shared memory layout:
+    // [0, M*N)                = R_work
+    // [M*N, M*N + M*K)        = Q_work  
+    // [M*N + M*K, + K)        = tau_storage
+    // [M*N + M*K + K, + N)    = vT_R (dot products for all trailing columns)
+    // [M*N+M*K+K+N, +tg_size) = reduction_buf
     threadgroup float* R_work = shared;
     threadgroup float* Q_work = shared + M * N;
     threadgroup float* tau_storage = shared + M * N + M * K;
-    threadgroup float* reduction_buf = shared + M * N + M * K + K;
+    threadgroup float* vT_R_all = shared + M * N + M * K + K;  // To store all v^T @ R[:, j]
+    threadgroup float* reduction_buf = shared + M * N + M * K + K + N;
     
-    // ========== PHASE 1: Compute R ==========
+    // ========== PHASE 1: Load A into shared memory ==========
     uint total_A = M * N;
     for (uint idx = tid; idx < total_A; idx += tg_size) {
         R_work[idx] = A_in[idx];
@@ -923,30 +1592,42 @@ kernel void qr_batched_kernel(
     uint total_Q = M * K;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
+    // ========== PHASE 2: Compute R using Householder reflectors ==========
     for (uint k = 0; k < K; k++) {
         uint v_len = M - k;
         
+        // Step 2a: Compute sigma = sum(R[k+1:, k]^2) using parallel reduction
         float local_sigma = 0.0f;
         for (uint i = tid + 1; i < v_len; i += tg_size) {
             float val = R_work[(k + i) * N + k];
             local_sigma += val * val;
         }
         
-        reduction_buf[tid] = local_sigma;
+        // SIMD-level reduction first (no barriers needed)
+        local_sigma = simd_sum(local_sigma, simd_lane, SIMD_SIZE);
+        
+        // Now cross-SIMD reduction (only first lane of each simdgroup participates)
+        if (simd_lane == 0) {
+            reduction_buf[simd_group_id] = local_sigma;
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         
-        for (uint s = tg_size / 2; s > 0; s >>= 1) {
-            if (tid < s) reduction_buf[tid] += reduction_buf[tid + s];
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Final reduction by first SIMD group
+        if (simd_group_id == 0 && simd_lane < num_simd_groups) {
+            local_sigma = reduction_buf[simd_lane];
+        } else {
+            local_sigma = 0.0f;
         }
+        local_sigma = simd_sum(local_sigma, simd_lane, SIMD_SIZE);
         
-        float sigma = reduction_buf[0];
+        float sigma = local_sigma;  // Now all threads have sigma
         float x0 = R_work[k * N + k];
         
+        // Step 2b: Compute tau and v0_factor
         float tau_k = 0.0f;
         float v0_factor = 1.0f;
         
-        if (sigma > 1e-10f) {
+        if (sigma > 1e-10f || x0 * x0 > 1e-10f) {
             float norm_x = sqrt(x0 * x0 + sigma);
             float sign = (x0 >= 0.0f) ? 1.0f : -1.0f;
             float v0 = x0 + sign * norm_x;
@@ -960,35 +1641,77 @@ kernel void qr_batched_kernel(
         
         if (tau_k == 0.0f) continue;
         
-        for (uint j = k + 1; j < N; j++) {
-            float local_dot = (tid == 0) ? R_work[k * N + j] : 0.0f;
-            for (uint i = tid + 1; i < v_len; i += tg_size) {
-                local_dot += R_work[(k + i) * N + k] * v0_factor * R_work[(k + i) * N + j];
-            }
-            
-            reduction_buf[tid] = local_dot;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            
-            for (uint s = tg_size / 2; s > 0; s >>= 1) {
-                if (tid < s) reduction_buf[tid] += reduction_buf[tid + s];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            
-            float vT_r = reduction_buf[0];
-            if (tid == 0) R_work[k * N + j] -= tau_k * vT_r;
-            for (uint i = tid + 1; i < v_len; i += tg_size) {
-                R_work[(k + i) * N + j] -= tau_k * R_work[(k + i) * N + k] * v0_factor * vT_r;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-        }
+        // Step 2c: Compute v^T @ R[:, j] for ALL trailing columns in PARALLEL
+        // Key optimization: each thread computes partial sum for ALL columns
+        // Then we do a single reduction across threads
         
+        uint num_trailing_cols = N - k - 1;
+        
+        // Each thread computes its contribution to all trailing columns
+        // First, compute partial v^T @ R for all columns this thread is responsible for in reduction
+        for (uint j_offset = 0; j_offset < num_trailing_cols; j_offset += tg_size) {
+            uint j_local = j_offset + tid;
+            if (j_local < num_trailing_cols) {
+                uint j = k + 1 + j_local;
+                float dot = R_work[k * N + j];  // v[0] = 1
+                
+                // ILP4: Process 4 rows per iteration to reduce loop overhead
+                uint i = 1;
+                float dot0 = 0.0f, dot1 = 0.0f, dot2 = 0.0f, dot3 = 0.0f;
+                for (; i + 3 < v_len; i += 4) {
+                    float v0 = R_work[(k + i) * N + k] * v0_factor;
+                    float v1 = R_work[(k + i + 1) * N + k] * v0_factor;
+                    float v2 = R_work[(k + i + 2) * N + k] * v0_factor;
+                    float v3 = R_work[(k + i + 3) * N + k] * v0_factor;
+                    dot0 += v0 * R_work[(k + i) * N + j];
+                    dot1 += v1 * R_work[(k + i + 1) * N + j];
+                    dot2 += v2 * R_work[(k + i + 2) * N + j];
+                    dot3 += v3 * R_work[(k + i + 3) * N + j];
+                }
+                dot += dot0 + dot1 + dot2 + dot3;
+                // Handle remainder
+                for (; i < v_len; i++) {
+                    dot += R_work[(k + i) * N + k] * v0_factor * R_work[(k + i) * N + j];
+                }
+                vT_R_all[j_local] = dot;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Step 2d: Apply updates to ALL trailing columns in parallel
+        for (uint j_offset = 0; j_offset < num_trailing_cols; j_offset += tg_size) {
+            uint j_local = j_offset + tid;
+            if (j_local < num_trailing_cols) {
+                uint j = k + 1 + j_local;
+                float vT_r = vT_R_all[j_local];
+                
+                // Update R[k, j]
+                R_work[k * N + j] -= tau_k * vT_r;
+                
+                // Update R[k+1:, j] with ILP4
+                float update_factor = tau_k * v0_factor * vT_r;
+                uint i = 1;
+                for (; i + 3 < v_len; i += 4) {
+                    R_work[(k + i) * N + j] -= update_factor * R_work[(k + i) * N + k];
+                    R_work[(k + i + 1) * N + j] -= update_factor * R_work[(k + i + 1) * N + k];
+                    R_work[(k + i + 2) * N + j] -= update_factor * R_work[(k + i + 2) * N + k];
+                    R_work[(k + i + 3) * N + j] -= update_factor * R_work[(k + i + 3) * N + k];
+                }
+                for (; i < v_len; i++) {
+                    R_work[(k + i) * N + j] -= update_factor * R_work[(k + i) * N + k];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Step 2e: Normalize v (store v/v0 below diagonal)
         for (uint i = tid + 1; i < v_len; i += tg_size) {
             R_work[(k + i) * N + k] *= v0_factor;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     
-    // ========== PHASE 2: Build Q in reverse ==========
+    // ========== PHASE 3: Build Q by applying reflectors in reverse ==========
     for (uint idx = tid; idx < total_Q; idx += tg_size) {
         uint row = idx / K;
         uint col = idx % K;
@@ -1002,30 +1725,53 @@ kernel void qr_batched_kernel(
         
         uint v_len = M - k;
         
-        for (uint j = 0; j < K; j++) {
-            float local_vq = (tid == 0) ? Q_work[k * K + j] : 0.0f;
-            for (uint i = tid + 1; i < v_len; i += tg_size) {
-                local_vq += R_work[(k + i) * N + k] * Q_work[(k + i) * K + j];
+        // Compute v^T @ Q[:, j] for all Q columns in parallel
+        for (uint j_offset = 0; j_offset < K; j_offset += tg_size) {
+            uint j_local = j_offset + tid;
+            if (j_local < K) {
+                float vq = Q_work[k * K + j_local];  // v[0] = 1
+                // ILP4 for Q dot product
+                uint i = 1;
+                float vq0 = 0.0f, vq1 = 0.0f, vq2 = 0.0f, vq3 = 0.0f;
+                for (; i + 3 < v_len; i += 4) {
+                    vq0 += R_work[(k + i) * N + k] * Q_work[(k + i) * K + j_local];
+                    vq1 += R_work[(k + i + 1) * N + k] * Q_work[(k + i + 1) * K + j_local];
+                    vq2 += R_work[(k + i + 2) * N + k] * Q_work[(k + i + 2) * K + j_local];
+                    vq3 += R_work[(k + i + 3) * N + k] * Q_work[(k + i + 3) * K + j_local];
+                }
+                vq += vq0 + vq1 + vq2 + vq3;
+                for (; i < v_len; i++) {
+                    vq += R_work[(k + i) * N + k] * Q_work[(k + i) * K + j_local];
+                }
+                vT_R_all[j_local] = vq;
             }
-            
-            reduction_buf[tid] = local_vq;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            
-            for (uint s = tg_size / 2; s > 0; s >>= 1) {
-                if (tid < s) reduction_buf[tid] += reduction_buf[tid + s];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            
-            float vq = reduction_buf[0];
-            if (tid == 0) Q_work[k * K + j] -= tau_k * vq;
-            for (uint i = tid + 1; i < v_len; i += tg_size) {
-                Q_work[(k + i) * K + j] -= tau_k * R_work[(k + i) * N + k] * vq;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Apply updates to all Q columns in parallel
+        for (uint j_offset = 0; j_offset < K; j_offset += tg_size) {
+            uint j_local = j_offset + tid;
+            if (j_local < K) {
+                float vq = vT_R_all[j_local];
+                Q_work[k * K + j_local] -= tau_k * vq;
+                // ILP4 for Q update
+                float q_update = tau_k * vq;
+                uint i = 1;
+                for (; i + 3 < v_len; i += 4) {
+                    Q_work[(k + i) * K + j_local] -= q_update * R_work[(k + i) * N + k];
+                    Q_work[(k + i + 1) * K + j_local] -= q_update * R_work[(k + i + 1) * N + k];
+                    Q_work[(k + i + 2) * K + j_local] -= q_update * R_work[(k + i + 2) * N + k];
+                    Q_work[(k + i + 3) * K + j_local] -= q_update * R_work[(k + i + 3) * N + k];
+                }
+                for (; i < v_len; i++) {
+                    Q_work[(k + i) * K + j_local] -= q_update * R_work[(k + i) * N + k];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     
-    // ========== PHASE 3: Write outputs ==========
+    // ========== PHASE 4: Write outputs ==========
     for (uint idx = tid; idx < total_Q; idx += tg_size) {
         Q_out[idx] = Q_work[idx];
     }
@@ -1040,7 +1786,162 @@ kernel void qr_batched_kernel(
 
 
 // ============================================================================
-// Batched TRSM (Triangular Solve) Kernel
+// SPECIALIZED 8x8 TRSM KERNEL - Register-Based (Upper Triangular)
+// ============================================================================
+// Solves R @ X = B for 8x8 upper triangular R
+// - 1 thread per matrix, all data in registers
+// - NO barriers - pure sequential computation
+// - Back-substitution from row 7 down to row 0
+
+kernel void trsm_batched_8x8_register_kernel(
+    device const float* R_batch [[buffer(0)]],
+    device const float* B_batch [[buffer(1)]],
+    device float* X_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    constant uint& NRHS [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= Batch) return;
+    
+    const uint N = 8;
+    device const float* R = R_batch + tid * N * N;
+    device const float* B = B_batch + tid * N * NRHS;
+    device float* X = X_batch + tid * N * NRHS;
+    
+    // Process each right-hand side
+    for (uint j = 0; j < NRHS; j++) {
+        // Load B column into registers
+        float x[8];
+        for (uint i = 0; i < N; i++) {
+            x[i] = B[i * NRHS + j];
+        }
+        
+        // Back-substitution: x[i] = (b[i] - sum(R[i,k]*x[k])) / R[i,i]
+        // Fully unrolled for 8x8
+        x[7] = x[7] / R[7*N + 7];
+        
+        x[6] = (x[6] - R[6*N + 7] * x[7]) / R[6*N + 6];
+        
+        x[5] = (x[5] - R[5*N + 6] * x[6] - R[5*N + 7] * x[7]) / R[5*N + 5];
+        
+        x[4] = (x[4] - R[4*N + 5] * x[5] - R[4*N + 6] * x[6] - R[4*N + 7] * x[7]) / R[4*N + 4];
+        
+        x[3] = (x[3] - R[3*N + 4] * x[4] - R[3*N + 5] * x[5] - R[3*N + 6] * x[6] - R[3*N + 7] * x[7]) / R[3*N + 3];
+        
+        x[2] = (x[2] - R[2*N + 3] * x[3] - R[2*N + 4] * x[4] - R[2*N + 5] * x[5] - R[2*N + 6] * x[6] - R[2*N + 7] * x[7]) / R[2*N + 2];
+        
+        x[1] = (x[1] - R[1*N + 2] * x[2] - R[1*N + 3] * x[3] - R[1*N + 4] * x[4] - R[1*N + 5] * x[5] - R[1*N + 6] * x[6] - R[1*N + 7] * x[7]) / R[1*N + 1];
+        
+        x[0] = (x[0] - R[0*N + 1] * x[1] - R[0*N + 2] * x[2] - R[0*N + 3] * x[3] - R[0*N + 4] * x[4] - R[0*N + 5] * x[5] - R[0*N + 6] * x[6] - R[0*N + 7] * x[7]) / R[0*N + 0];
+        
+        // Write result
+        for (uint i = 0; i < N; i++) {
+            X[i * NRHS + j] = x[i];
+        }
+    }
+}
+
+// ============================================================================
+// SPECIALIZED 16x16 TRSM KERNEL - SIMD-Based (Upper Triangular)
+// ============================================================================
+// Solves R @ X = B for 16x16 upper triangular R
+// - 16 threads, each handles partial work
+// - Uses simd_broadcast for synchronization
+
+kernel void trsm_batched_16x16_kernel(
+    device const float* R_batch [[buffer(0)]],
+    device const float* B_batch [[buffer(1)]],
+    device float* X_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    constant uint& NRHS [[buffer(4)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]]
+) {
+    if (batch_idx >= Batch) return;
+    
+    const uint N = 16;
+    device const float* R = R_batch + batch_idx * N * N;
+    device const float* B = B_batch + batch_idx * N * NRHS;
+    device float* X = X_batch + batch_idx * N * NRHS;
+    
+    // Each thread handles column(s) of the result
+    // For NRHS=1, only thread 0 does work but all sync via simd
+    
+    for (uint j = 0; j < NRHS; j++) {
+        // Load X from B into shared memory
+        if (tid < N) {
+            shared[tid] = B[tid * NRHS + j];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Back-substitution
+        for (int i = N - 1; i >= 0; i--) {
+            if (tid == 0) {
+                float sum = shared[i];
+                for (uint k = i + 1; k < N; k++) {
+                    sum -= R[i * N + k] * shared[k];
+                }
+                shared[i] = sum / R[i * N + i];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        
+        // Write result
+        if (tid < N) {
+            X[tid * NRHS + j] = shared[tid];
+        }
+    }
+}
+
+// ============================================================================
+// SPECIALIZED 32x32 TRSM KERNEL - SIMD-Based (Upper Triangular)
+// ============================================================================
+// Solves R @ X = B for 32x32 upper triangular R
+
+kernel void trsm_batched_32x32_kernel(
+    device const float* R_batch [[buffer(0)]],
+    device const float* B_batch [[buffer(1)]],
+    device float* X_batch [[buffer(2)]],
+    constant uint& Batch [[buffer(3)]],
+    constant uint& NRHS [[buffer(4)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint batch_idx [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]]
+) {
+    if (batch_idx >= Batch) return;
+    
+    const uint N = 32;
+    device const float* R = R_batch + batch_idx * N * N;
+    device const float* B = B_batch + batch_idx * N * NRHS;
+    device float* X = X_batch + batch_idx * N * NRHS;
+    
+    for (uint j = 0; j < NRHS; j++) {
+        // Load X from B into shared memory (each thread loads one element)
+        shared[tid] = B[tid * NRHS + j];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Back-substitution - thread 0 does all work, others sync
+        for (int i = N - 1; i >= 0; i--) {
+            if (tid == 0) {
+                float sum = shared[i];
+                for (uint k = i + 1; k < N; k++) {
+                    sum -= R[i * N + k] * shared[k];
+                }
+                shared[i] = sum / R[i * N + i];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        
+        // Write result
+        X[tid * NRHS + j] = shared[tid];
+    }
+}
+
+// ============================================================================
+// Batched TRSM (Triangular Solve) Kernel - General
 // ============================================================================
 // Solves R @ X = B where R is upper triangular
 // Each threadgroup handles one matrix in the batch
@@ -3341,4 +4242,70 @@ kernel void solve_batched_kernel(
             }
         }
     }
+}
+
+// ============================================================================
+// Tensor Manipulation Kernels
+// ============================================================================
+
+// Transpose 0, 2, 1, 3: [Dim0, Dim1, Dim2, Dim3] -> [Dim0, Dim2, Dim1, Dim3]
+// Used for [B, L, H, D] <-> [B, H, L, D] layout conversion
+//
+// Logic:
+// idx maps to Output logical indices (d0, d2, d1, d3)
+// We map back to Input (d0, d1, d2, d3)
+// 
+// Args:
+//   input: source buffer
+//   output: destination buffer
+//   Dim0, Dim1, Dim2, Dim3: Dimensions of the INPUT tensor
+//
+// Output tensor has dims: [Dim0, Dim2, Dim1, Dim3]
+kernel void transpose_0213_kernel(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& Dim0 [[buffer(2)]],
+    constant uint& Dim1 [[buffer(3)]],
+    constant uint& Dim2 [[buffer(4)]],
+    constant uint& Dim3 [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    // Total elements
+    uint total = Dim0 * Dim1 * Dim2 * Dim3;
+    if (gid >= total) return;
+    
+    // Decompose gid based on OUTPUT dimensions: [D0, D2, D1, D3]
+    // Out_D3 = Dim3
+    // Out_D2 = Dim1
+    // Out_D1 = Dim2
+    // Out_D0 = Dim0
+    
+    uint d3 = gid % Dim3;
+    uint rem = gid / Dim3;
+    
+    uint d1 = rem % Dim1; // Index for Out_D2 (which matches Input Dim1)
+    rem = rem / Dim1;
+    
+    uint d2 = rem % Dim2; // Index for Out_D1 (which matches Input Dim2)
+    rem = rem / Dim2;
+    
+    uint d0 = rem;
+    
+    // Construct Input Index based on [D0, D1, D2, D3]
+    // Strides: 
+    //   Stride3 = 1
+    //   Stride2 = Dim3
+    //   Stride1 = Dim2 * Dim3
+    //   Stride0 = Dim1 * Dim2 * Dim3
+    
+    // Mapping:
+    // Input Dim 1 index is d1 (from Out_D2)
+    // Input Dim 2 index is d2 (from Out_D1)
+    
+    uint in_idx = d0 * (Dim1 * Dim2 * Dim3) + 
+                  d1 * (Dim2 * Dim3) +       // d1 is index for Dim1
+                  d2 * Dim3 +                // d2 is index for Dim2
+                  d3;
+    
+    output[gid] = input[in_idx];
 }

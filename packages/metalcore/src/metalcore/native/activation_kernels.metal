@@ -1,3 +1,6 @@
+// Author: Kris Bailey
+// Copyright 2026
+// Email: kris@krisbailey.com
 #include <metal_stdlib>
 using namespace metal;
 
@@ -51,12 +54,25 @@ kernel void gelu_fwd(
     
     float4 x = X[id];
     
-    // Compute using macro constants
+    // GELU: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    // For numerical stability, clamp large values where tanh saturates to ±1
+    // tanh(x) ≈ 1 for x > 6, so GELU(x) ≈ x for x > ~4
     float4 x3 = x * x * x;
     float4 arg = GELU_SQRT_2_OVER_PI * (x + GELU_COEFF * x3);
+    
+    // Clamp argument to prevent NaN in tanh for very large values
+    arg = clamp(arg, float4(-10.0f), float4(10.0f));
     float4 tanh_val = tanh(arg);
     
-    Y[id] = x * 0.5f * (1.0f + tanh_val);
+    // For |x| > threshold, GELU asymptotes to x (positive) or 0 (negative)
+    float4 result = x * 0.5f * (1.0f + tanh_val);
+    
+    // Handle extreme positive values: GELU(x) ≈ x for large positive x
+    result = select(result, x, x > 10.0f);
+    // Handle extreme negative values: GELU(x) ≈ 0 for large negative x
+    result = select(result, float4(0.0f), x < -10.0f);
+    
+    Y[id] = result;
 }
 
 kernel void gelu_bwd(

@@ -1,3 +1,6 @@
+// Author: Kris Bailey
+// Copyright 2026
+// Email: kris@krisbailey.com
 #include <metal_stdlib>
 using namespace metal;
 
@@ -463,4 +466,718 @@ kernel void sdpa_vector_64(
     
     // Normalize and write output (each thread writes one dimension)
     o_ptr[d] = o_acc / l_prev;
+}
+
+// =============================================================================
+// FUSED RoPE + SDPA - Apply RoPE inline during attention
+// =============================================================================
+// Eliminates separate RoPE kernel dispatch and memory round-trip.
+// Uses split-half RoPE format (HuggingFace/Liger style):
+//   x1 = x[..., :D/2], x2 = x[..., D/2:]
+//   rotated[..., :D/2] = x1 * cos - x2 * sin
+//   rotated[..., D/2:] = x2 * cos + x1 * sin
+//
+// Each thread owns one dimension d in head_dim=64.
+// RoPE is applied inline when loading Q and K values.
+
+kernel void rope_sdpa_64(
+    device const float* Q [[buffer(0)]],          // (B*H, N, 64) - unrotated
+    device const float* K [[buffer(1)]],          // (B*H, N_kv, 64) - unrotated
+    device const float* V [[buffer(2)]],          // (B*H, N_kv, 64)
+    device const float* cos [[buffer(3)]],        // (max_seq, 32) or (N, 32)
+    device const float* sin [[buffer(4)]],        // (max_seq, 32) or (N, 32)
+    device float* O [[buffer(5)]],                // (B*H, N, 64)
+    constant uint& gqa_factor [[buffer(6)]],
+    constant uint& q_seq_len [[buffer(7)]],
+    constant uint& kv_seq_len [[buffer(8)]],
+    constant uint& q_stride [[buffer(9)]],
+    constant uint& k_stride [[buffer(10)]],
+    constant uint& v_stride [[buffer(11)]],
+    constant float& scale [[buffer(12)]],
+    constant uint& q_offset [[buffer(13)]],       // For KV cache: position offset for Q
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    uint kv_head = batch_head / gqa_factor;
+    
+    // Each thread owns one dimension of head_dim=64
+    uint d = tid;
+    if (d >= 64) return;
+    
+    // Compute RoPE indices (split-half format)
+    uint half_dim = 32;
+    uint d_rot = d % half_dim;      // [0, 31]
+    bool is_second_half = (d >= half_dim);
+    
+    // Pointers
+    device const float* q_ptr = Q + batch_head * q_stride + q_idx * HEAD_DIM_64;
+    device const float* k_base = K + kv_head * k_stride;
+    device const float* v_base = V + kv_head * v_stride;
+    device float* o_ptr = O + batch_head * q_stride + q_idx * HEAD_DIM_64;
+    
+    // === Apply RoPE to Q ===
+    // Position for Q is q_idx + q_offset (for KV cache scenarios)
+    uint q_pos = q_idx + q_offset;
+    uint q_cs_idx = q_pos * half_dim + d_rot;
+    float q_cos = cos[q_cs_idx];
+    float q_sin = sin[q_cs_idx];
+    
+    // Load Q elements for rotation
+    float q1 = q_ptr[d_rot];              // First half element
+    float q2 = q_ptr[half_dim + d_rot];   // Second half element
+    
+    // Compute rotated Q value for this dimension
+    float q_rotated;
+    if (is_second_half) {
+        q_rotated = q2 * q_cos + q1 * q_sin;
+    } else {
+        q_rotated = q1 * q_cos - q2 * q_sin;
+    }
+    
+    // Shared memory for dot product reduction
+    threadgroup float shared_scratch[64];
+    
+    // Online softmax accumulators
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    // Process all keys
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const float* k_ptr = k_base + k_idx * HEAD_DIM_64;
+        device const float* v_ptr = v_base + k_idx * HEAD_DIM_64;
+        
+        // === Apply RoPE to K ===
+        uint k_cs_idx = k_idx * half_dim + d_rot;
+        float k_cos = cos[k_cs_idx];
+        float k_sin = sin[k_cs_idx];
+        
+        float k1 = k_ptr[d_rot];
+        float k2 = k_ptr[half_dim + d_rot];
+        
+        float k_rotated;
+        if (is_second_half) {
+            k_rotated = k2 * k_cos + k1 * k_sin;
+        } else {
+            k_rotated = k1 * k_cos - k2 * k_sin;
+        }
+        
+        // Compute partial dot product (rotated Q · rotated K)
+        float partial = q_rotated * k_rotated;
+        
+        // Reduce to get full dot product (sum across 64 threads)
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Tree reduction
+        if (tid < 32) shared_scratch[tid] += shared_scratch[tid + 32];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        float dot;
+        if (tid < 32) {
+            dot = simd_sum(shared_scratch[tid]);
+        }
+        // Broadcast dot to all threads
+        if (tid == 0) shared_scratch[0] = dot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        // Online softmax update
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        // Load V (no RoPE on V) and update output accumulator
+        float v_val = v_ptr[d];
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+    }
+    
+    // Normalize and write output
+    o_ptr[d] = o_acc / l_prev;
+}
+
+// Half-precision version
+kernel void rope_sdpa_64_half(
+    device const half* Q [[buffer(0)]],
+    device const half* K [[buffer(1)]],
+    device const half* V [[buffer(2)]],
+    device const half* cos [[buffer(3)]],
+    device const half* sin [[buffer(4)]],
+    device half* O [[buffer(5)]],
+    constant uint& gqa_factor [[buffer(6)]],
+    constant uint& q_seq_len [[buffer(7)]],
+    constant uint& kv_seq_len [[buffer(8)]],
+    constant uint& q_stride [[buffer(9)]],
+    constant uint& k_stride [[buffer(10)]],
+    constant uint& v_stride [[buffer(11)]],
+    constant float& scale [[buffer(12)]],
+    constant uint& q_offset [[buffer(13)]],
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    uint kv_head = batch_head / gqa_factor;
+    
+    uint d = tid;
+    if (d >= 64) return;
+    
+    uint half_dim = 32;
+    uint d_rot = d % half_dim;
+    bool is_second_half = (d >= half_dim);
+    
+    device const half* q_ptr = Q + batch_head * q_stride + q_idx * HEAD_DIM_64;
+    device const half* k_base = K + kv_head * k_stride;
+    device const half* v_base = V + kv_head * v_stride;
+    device half* o_ptr = O + batch_head * q_stride + q_idx * HEAD_DIM_64;
+    
+    // Apply RoPE to Q (in fp32 for precision)
+    uint q_pos = q_idx + q_offset;
+    uint q_cs_idx = q_pos * half_dim + d_rot;
+    float q_cos = float(cos[q_cs_idx]);
+    float q_sin = float(sin[q_cs_idx]);
+    
+    float q1 = float(q_ptr[d_rot]);
+    float q2 = float(q_ptr[half_dim + d_rot]);
+    
+    float q_rotated = is_second_half ? (q2 * q_cos + q1 * q_sin) : (q1 * q_cos - q2 * q_sin);
+    
+    threadgroup float shared_scratch[64];
+    
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const half* k_ptr = k_base + k_idx * HEAD_DIM_64;
+        device const half* v_ptr = v_base + k_idx * HEAD_DIM_64;
+        
+        // Apply RoPE to K
+        uint k_cs_idx = k_idx * half_dim + d_rot;
+        float k_cos = float(cos[k_cs_idx]);
+        float k_sin = float(sin[k_cs_idx]);
+        
+        float k1 = float(k_ptr[d_rot]);
+        float k2 = float(k_ptr[half_dim + d_rot]);
+        
+        float k_rotated = is_second_half ? (k2 * k_cos + k1 * k_sin) : (k1 * k_cos - k2 * k_sin);
+        
+        float partial = q_rotated * k_rotated;
+        
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (tid < 32) shared_scratch[tid] += shared_scratch[tid + 32];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        float dot;
+        if (tid < 32) {
+            dot = simd_sum(shared_scratch[tid]);
+        }
+        if (tid == 0) shared_scratch[0] = dot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        float v_val = float(v_ptr[d]);
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+    }
+    
+    o_ptr[d] = half(o_acc / l_prev);
+}
+
+// =============================================================================
+// STRIDED RoPE + SDPA - Zero-copy support for [B, L, H, D] layouts
+// =============================================================================
+
+kernel void rope_sdpa_64_strided(
+    device const float* Q [[buffer(0)]],          // (B*H, N, 64) - unrotated
+    device const float* K [[buffer(1)]],          // (B*H, N_kv, 64) - unrotated
+    device const float* V [[buffer(2)]],          // (B*H, N_kv, 64)
+    device const float* cos [[buffer(3)]],        // (max_seq, 32)
+    device const float* sin [[buffer(4)]],        // (max_seq, 32)
+    device float* O [[buffer(5)]],                // (B*H, N, 64)
+    constant uint& gqa_factor [[buffer(6)]],
+    constant uint& q_seq_len [[buffer(7)]],
+    constant uint& kv_seq_len [[buffer(8)]],
+    constant uint& q_head_stride [[buffer(9)]],   // Stride between heads
+    constant uint& k_head_stride [[buffer(10)]],
+    constant uint& v_head_stride [[buffer(11)]],
+    constant uint& q_seq_stride [[buffer(12)]],   // Stride between sequence elements: H*D for [B,L,H,D]
+    constant uint& k_seq_stride [[buffer(13)]],
+    constant uint& v_seq_stride [[buffer(14)]],
+    constant float& scale [[buffer(15)]],
+    constant uint& q_offset [[buffer(16)]],
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    uint kv_head = batch_head / gqa_factor;
+    
+    uint d = tid;
+    if (d >= 64) return;
+    
+    // RoPE indices
+    uint half_dim = 32;
+    uint d_rot = d % half_dim;
+    bool is_second_half = (d >= half_dim);
+    
+    // Pointers with EXPLICT STRIDES
+    device const float* q_ptr = Q + batch_head * q_head_stride + q_idx * q_seq_stride;
+    device const float* k_base = K + kv_head * k_head_stride;
+    device const float* v_base = V + kv_head * v_head_stride;
+    device float* o_ptr = O + batch_head * q_head_stride + q_idx * q_seq_stride;
+    
+    // Apply RoPE to Q
+    uint q_pos = q_idx + q_offset;
+    uint q_cs_idx = q_pos * half_dim + d_rot;
+    float q_cos = cos[q_cs_idx];
+    float q_sin = sin[q_cs_idx];
+    
+    float q1 = q_ptr[d_rot];
+    float q2 = q_ptr[half_dim + d_rot];
+    
+    float q_rotated;
+    if (is_second_half) {
+        q_rotated = q2 * q_cos + q1 * q_sin;
+    } else {
+        q_rotated = q1 * q_cos - q2 * q_sin;
+    }
+    
+    threadgroup float shared_scratch[64];
+    
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const float* k_ptr = k_base + k_idx * k_seq_stride;
+        device const float* v_ptr = v_base + k_idx * v_seq_stride;
+        
+        // Apply RoPE to K
+        uint k_cs_idx = k_idx * half_dim + d_rot;
+        float k_cos = cos[k_cs_idx];
+        float k_sin = sin[k_cs_idx];
+        
+        float k1 = k_ptr[d_rot];
+        float k2 = k_ptr[half_dim + d_rot];
+        
+        float k_rotated;
+        if (is_second_half) {
+            k_rotated = k2 * k_cos + k1 * k_sin;
+        } else {
+            k_rotated = k1 * k_cos - k2 * k_sin;
+        }
+        
+        float partial = q_rotated * k_rotated;
+        
+        // Reduction
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (tid < 32) shared_scratch[tid] += shared_scratch[tid + 32];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        float dot;
+        if (tid < 32) dot = simd_sum(shared_scratch[tid]);
+        if (tid == 0) shared_scratch[0] = dot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        float v_val = v_ptr[d];
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+    }
+    
+    o_ptr[d] = o_acc / l_prev;
+}
+
+kernel void rope_sdpa_64_half_strided(
+    device const half* Q [[buffer(0)]],
+    device const half* K [[buffer(1)]],
+    device const half* V [[buffer(2)]],
+    device const half* cos [[buffer(3)]],
+    device const half* sin [[buffer(4)]],
+    device half* O [[buffer(5)]],
+    constant uint& gqa_factor [[buffer(6)]],
+    constant uint& q_seq_len [[buffer(7)]],
+    constant uint& kv_seq_len [[buffer(8)]],
+    constant uint& q_head_stride [[buffer(9)]],
+    constant uint& k_head_stride [[buffer(10)]],
+    constant uint& v_head_stride [[buffer(11)]],
+    constant uint& q_seq_stride [[buffer(12)]],
+    constant uint& k_seq_stride [[buffer(13)]],
+    constant uint& v_seq_stride [[buffer(14)]],
+    constant float& scale [[buffer(15)]],
+    constant uint& q_offset [[buffer(16)]],
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]
+) {
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    uint kv_head = batch_head / gqa_factor;
+    
+    uint d = tid;
+    if (d >= 64) return;
+    
+    uint half_dim = 32;
+    uint d_rot = d % half_dim;
+    bool is_second_half = (d >= half_dim);
+    
+    device const half* q_ptr = Q + batch_head * q_head_stride + q_idx * q_seq_stride;
+    device const half* k_base = K + kv_head * k_head_stride;
+    device const half* v_base = V + kv_head * v_head_stride;
+    device half* o_ptr = O + batch_head * q_head_stride + q_idx * q_seq_stride;
+    
+    uint q_pos = q_idx + q_offset;
+    uint q_cs_idx = q_pos * half_dim + d_rot;
+    float q_cos = float(cos[q_cs_idx]);
+    float q_sin = float(sin[q_cs_idx]);
+    
+    float q1 = float(q_ptr[d_rot]);
+    float q2 = float(q_ptr[half_dim + d_rot]);
+    
+    float q_rotated = is_second_half ? (q2 * q_cos + q1 * q_sin) : (q1 * q_cos - q2 * q_sin);
+    
+    threadgroup float shared_scratch[64];
+    
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const half* k_ptr = k_base + k_idx * k_seq_stride;
+        device const half* v_ptr = v_base + k_idx * v_seq_stride;
+        
+        uint k_cs_idx = k_idx * half_dim + d_rot;
+        float k_cos = float(cos[k_cs_idx]);
+        float k_sin = float(sin[k_cs_idx]);
+        
+        float k1 = float(k_ptr[d_rot]);
+        float k2 = float(k_ptr[half_dim + d_rot]);
+        
+        float k_rotated = is_second_half ? (k2 * k_cos + k1 * k_sin) : (k1 * k_cos - k2 * k_sin);
+        
+        float partial = q_rotated * k_rotated;
+        
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (tid < 32) shared_scratch[tid] += shared_scratch[tid + 32];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        float dot;
+        if (tid < 32) dot = simd_sum(shared_scratch[tid]);
+        if (tid == 0) shared_scratch[0] = dot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        float v_val = float(v_ptr[d]);
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+    }
+    
+    o_ptr[d] = half(o_acc / l_prev);
+}
+
+// =============================================================================
+// STRIDED RoPE + SDPA V2 - Correct logic for [B, L, H, D]
+// =============================================================================
+// Decomposes batch_head into (b, h) to handle non-contiguous B and H dims.
+
+kernel void rope_sdpa_64_strided_v2(
+    device const float* Q [[buffer(0)]],
+    device const float* K [[buffer(1)]],
+    device const float* V [[buffer(2)]],
+    device const float* cos [[buffer(3)]],
+    device const float* sin [[buffer(4)]],
+    device float* O [[buffer(5)]],
+    constant uint& gqa_factor [[buffer(6)]],
+    constant uint& q_seq_len [[buffer(7)]],
+    constant uint& kv_seq_len [[buffer(8)]],
+    
+    // Strides for [Batch, Head, Seq] dimensions
+    constant uint& q_batch_stride [[buffer(9)]],
+    constant uint& q_head_stride [[buffer(10)]],
+    constant uint& q_seq_stride [[buffer(11)]],
+    
+    constant uint& k_batch_stride [[buffer(12)]],
+    constant uint& k_head_stride [[buffer(13)]],
+    constant uint& k_seq_stride [[buffer(14)]],
+    
+    constant uint& v_batch_stride [[buffer(15)]],
+    constant uint& v_head_stride [[buffer(16)]],
+    constant uint& v_seq_stride [[buffer(17)]],
+    
+    constant float& scale [[buffer(18)]],
+    constant uint& q_offset [[buffer(19)]],
+    constant uint& num_heads [[buffer(20)]],
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    // Bounds check - but ALL threads must continue to barriers
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    
+    // Decompose batch_head -> b, h
+    uint b = batch_head / num_heads;
+    uint h = batch_head % num_heads;
+    uint h_kv = h / gqa_factor;
+    
+    uint d = tid;
+    // No early return! All 64 threads must reach barriers
+    
+    // RoPE setup
+    uint half_dim = 32;
+    uint d_rot = d % half_dim;
+    bool is_second_half = (d >= half_dim);
+    
+    // Calculate Pointers using separated strides
+    device const float* q_ptr = Q + b * q_batch_stride + h * q_head_stride + q_idx * q_seq_stride;
+    device const float* k_base = K + b * k_batch_stride + h_kv * k_head_stride;
+    device const float* v_base = V + b * v_batch_stride + h_kv * v_head_stride;
+    device float* o_ptr = O + b * q_batch_stride + h * q_head_stride + q_idx * q_seq_stride;
+    
+    // Apply RoPE to Q (split-half format)
+    uint q_pos = q_idx + q_offset;
+    uint q_cs_idx = q_pos * half_dim + d_rot;
+    float q_cos = cos[q_cs_idx];
+    float q_sin = sin[q_cs_idx];
+    
+    float q1 = q_ptr[d_rot];
+    float q2 = q_ptr[half_dim + d_rot];
+    
+    float q_rotated;
+    if (is_second_half) {
+        q_rotated = q2 * q_cos + q1 * q_sin;
+    } else {
+        q_rotated = q1 * q_cos - q2 * q_sin;
+    }
+    
+    threadgroup float shared_scratch[64];
+    shared_scratch[tid] = 0.0f;  // Initialize to avoid undefined behavior
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const float* k_ptr = k_base + k_idx * k_seq_stride;
+        device const float* v_ptr = v_base + k_idx * v_seq_stride;
+        
+        // Apply RoPE to K (split-half format)
+        uint k_cs_idx = k_idx * half_dim + d_rot;
+        float k_cos = cos[k_cs_idx];
+        float k_sin = sin[k_cs_idx];
+        
+        float k1 = k_ptr[d_rot];
+        float k2 = k_ptr[half_dim + d_rot];
+        
+        float k_rotated;
+        if (is_second_half) {
+            k_rotated = k2 * k_cos + k1 * k_sin;
+        } else {
+            k_rotated = k1 * k_cos - k2 * k_sin;
+        }
+        
+        float partial = q_rotated * k_rotated;
+        
+        // Reduction
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Full tree reduction: 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
+        for (uint stride = 32; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                shared_scratch[tid] += shared_scratch[tid + stride];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        float dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        // Apply causal mask: positions where k_idx > q_idx should be masked
+        if (k_idx > q_idx) {
+            s = -INFINITY;
+        }
+        
+        // Online softmax update
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        float v_val = v_ptr[d];
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+        
+        // Barrier to ensure all threads complete before next iteration writes to shared_scratch
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Write output - DEBUG: write the dot product for k_idx=0 only
+    // Actually need to track this during the loop, so let's just restore and test differently
+    o_ptr[d] = o_acc / l_prev;
+}
+
+kernel void rope_sdpa_64_half_strided_v2(
+    device const half* Q [[buffer(0)]],
+    device const half* K [[buffer(1)]],
+    device const half* V [[buffer(2)]],
+    device const half* cos [[buffer(3)]],
+    device const half* sin [[buffer(4)]],
+    device half* O [[buffer(5)]],
+    constant uint& gqa_factor [[buffer(6)]],
+    constant uint& q_seq_len [[buffer(7)]],
+    constant uint& kv_seq_len [[buffer(8)]],
+    
+    constant uint& q_batch_stride [[buffer(9)]],
+    constant uint& q_head_stride [[buffer(10)]],
+    constant uint& q_seq_stride [[buffer(11)]],
+    
+    constant uint& k_batch_stride [[buffer(12)]],
+    constant uint& k_head_stride [[buffer(13)]],
+    constant uint& k_seq_stride [[buffer(14)]],
+    
+    constant uint& v_batch_stride [[buffer(15)]],
+    constant uint& v_head_stride [[buffer(16)]],
+    constant uint& v_seq_stride [[buffer(17)]],
+    
+    constant float& scale [[buffer(18)]],
+    constant uint& q_offset [[buffer(19)]],
+    constant uint& num_heads [[buffer(20)]],
+    
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    uint batch_head = tgid.x;
+    uint q_idx = tgid.y;
+    
+    uint b = batch_head / num_heads;
+    uint h = batch_head % num_heads;
+    uint h_kv = h / gqa_factor;
+    
+    uint d = tid;
+    if (d >= 64) return;
+    
+    uint half_dim = 32;
+    uint d_rot = d % half_dim;
+    bool is_second_half = (d >= half_dim);
+    
+    device const half* q_ptr = Q + b * q_batch_stride + h * q_head_stride + q_idx * q_seq_stride;
+    device const half* k_base = K + b * k_batch_stride + h_kv * k_head_stride;
+    device const half* v_base = V + b * v_batch_stride + h_kv * v_head_stride;
+    device half* o_ptr = O + b * q_batch_stride + h * q_head_stride + q_idx * q_seq_stride;
+    
+    uint q_pos = q_idx + q_offset;
+    uint q_cs_idx = q_pos * half_dim + d_rot;
+    float q_cos = float(cos[q_cs_idx]);
+    float q_sin = float(sin[q_cs_idx]);
+    
+    float q1 = float(q_ptr[d_rot]);
+    float q2 = float(q_ptr[half_dim + d_rot]);
+    
+    float q_rotated = is_second_half ? (q2 * q_cos + q1 * q_sin) : (q1 * q_cos - q2 * q_sin);
+    
+    threadgroup float shared_scratch[64];
+    
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc = 0.0f;
+    
+    for (uint k_idx = 0; k_idx < kv_seq_len; ++k_idx) {
+        device const half* k_ptr = k_base + k_idx * k_seq_stride;
+        device const half* v_ptr = v_base + k_idx * v_seq_stride;
+        
+        uint k_cs_idx = k_idx * half_dim + d_rot;
+        float k_cos = float(cos[k_cs_idx]);
+        float k_sin = float(sin[k_cs_idx]);
+        
+        float k1 = float(k_ptr[d_rot]);
+        float k2 = float(k_ptr[half_dim + d_rot]);
+        
+        float k_rotated = is_second_half ? (k2 * k_cos + k1 * k_sin) : (k1 * k_cos - k2 * k_sin);
+        
+        float partial = q_rotated * k_rotated;
+        
+        shared_scratch[tid] = partial;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (tid < 32) shared_scratch[tid] += shared_scratch[tid + 32];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        float dot;
+        if (tid < 32) dot = simd_sum(shared_scratch[tid]);
+        if (tid == 0) shared_scratch[0] = dot;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        dot = shared_scratch[0];
+        
+        float s = dot * scale;
+        
+        float m_new = max(m_prev, s);
+        float exp_diff = exp(m_prev - m_new);
+        float exp_s = exp(s - m_new);
+        
+        l_prev = l_prev * exp_diff + exp_s;
+        
+        float v_val = float(v_ptr[d]);
+        o_acc = o_acc * exp_diff + v_val * exp_s;
+        
+        m_prev = m_new;
+    }
+    
+    o_ptr[d] = half(o_acc / l_prev);
 }

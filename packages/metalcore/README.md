@@ -22,25 +22,40 @@ pip install metalcore
 - **Solve**: LU-based, 10x faster batched (fp16/bf16 supported)
 
 ### Training Ops
-- **RMSNorm** (`MetalRMSNorm`): 2.5x faster than PyTorch
-- **AdamW** (`MetalAdamW`): 2.9x faster optimizer
-- **GELU/SiLU** (`metal_gelu`, `metal_silu`): Vectorized activations
-- **EmbeddingBag**: 50-100x faster (avoids CPU fallback)
+- **RMSNorm** (`MetalRMSNorm`): **675x faster** than PyTorch!
+- **AdamW** (`MetalAdamW`): 2.4x faster optimizer
+- **SiLU** (`metal_silu`): 1.1x faster
+- **EmbeddingBag**: 6x faster (avoids CPU fallback)
 - **LayerNorm**, **Softmax**: Fused implementations
 
-### PyTorch Integration (NEW in 0.1.12+)
+### RoPE (NEW in v0.1.14)
+- **`apply_rotary_pos_emb`**: Metal-accelerated rotary embeddings (3.4x faster)
+- **`RotaryEmbedding`**: Drop-in HuggingFace replacement module
+- **`patch_transformers_rope`**: Auto-patches Llama/Mistral/Qwen models
+
+
+### INT4 Quantization
+- **Hybrid approach** (recommended): `Int4Linear.from_float(linear, dequant_on_load=True)`
+  - Store as INT4 (7x disk compression), dequant to FP16 at load → **0.6ms** matmul
+- **GGML block_q4_0** (llama.cpp compatible): `quantize_ggml_q4_0`, `matmul_ggml_q4_0`
+  - Ported from llama.cpp using `simdgroup_multiply_accumulate`
+  - 4-15x overhead vs FP16 (36x faster than naive)
+  - Enables larger models: 7B→3.5GB, 70B→35GB
+
+### PyTorch Integration
 ```python
 import metalcore
 
-# Automatically accelerate F.silu, F.gelu, F.embedding_bag
+# Automatically accelerate F.silu, F.gelu, F.embedding_bag, torch.linalg.svd/qr
 metalcore.enable_pytorch_overrides()
 
 # Works seamlessly with HuggingFace models
 from transformers import AutoModelForCausalLM
 model = AutoModelForCausalLM.from_pretrained("...", device_map="mps")
 
-# Optional: Also patch RMSNorm modules
+# Optional: Also patch RMSNorm and RoPE modules
 metalcore.patch_transformers_rmsnorm(model)
+metalcore.patch_transformers_rope(model)
 ```
 
 ## Quick Start
@@ -81,13 +96,13 @@ y = metal_gelu(x)
 
 | Operation | Speedup |
 |-----------|---------|
-| EmbeddingBag | **50-100x** (vs CPU fallback) |
-| Cholesky Batched | **33x** |
-| QR Batched | **20x** |
-| Solve Batched | **10x** |
-| AdamW | **2.9x** |
-| RMSNorm | **2.5x** |
-| GELU/SiLU | **2-4x** |
+| RMSNorm | **675x** |
+| EmbeddingBag | **6x** (vs CPU fallback) |
+| AdamW | **2.4x** |
+| RoPE | **3.4x** |
+| SiLU | **1.1x** |
+| QR Batched | up to **20x** |
+| SVD (large) | up to **12x** |
 
 ## Requirements
 

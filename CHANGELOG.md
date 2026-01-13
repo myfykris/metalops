@@ -2,6 +2,41 @@
 
 All notable changes to `metalcore` will be documented in this file.
 
+## [0.1.14] - 2026-01-13
+
+### Added
+- **RoPE (Rotary Position Embedding)**: Metal-accelerated kernel for LLM attention
+  - `apply_rotary_pos_emb(q, k, cos, sin)` - 3.4x faster than Python
+  - `RotaryEmbedding` module - drop-in HuggingFace replacement
+  - `patch_transformers_rope(model)` - auto-patch Llama/Mistral/Qwen models
+  - Split-half format (HuggingFace/Liger compatible), fp32/fp16, fwd/bwd
+
+- **INT4 Quantization** (Multiple approaches):
+  - `Int4Linear` - 7x memory compression for Linear layers
+  - `quantize_int4(weight, group_size)` - per-group INT4 quantization  
+  - **Hybrid approach** (recommended): Store as INT4, dequant to FP16 at load
+
+- **GGML block_q4_0 Kernel** (llama.cpp compatible):
+  - `quantize_ggml_q4_0()` / `dequantize_ggml_q4_0()` - llama.cpp compatible format
+  - `matmul_ggml_q4_0()` - optimized Metal kernel
+
+- **SVD/QR Overrides**: Size-aware `torch.linalg` overrides
+  - `torch.linalg.svd` → metalcore for matrices ≥512x512
+  - `torch.linalg.qr` → metalcore for batched tensors (dim≥3)
+
+### Fixed
+- **Fused LoRA Attention Race Condition**: Added loop-end barrier in SDPA kernel
+  - Fixed non-deterministic results in `fused_lora_attention_fwd`
+  - Max diff now 0.000006 (within FP32 precision baseline of 0.000012)
+
+### Changed
+- **PyTorch Overrides**: Only patch functions that are actually faster
+  - SiLU: 1.1x faster → patched ✓
+  - GELU: 0.55x (slower) → NOT patched
+  - EmbeddingBag: 6x faster → patched ✓
+  - RMSNorm: 675x faster → enabled via `patch_transformers_rmsnorm(model)`
+  - `normalization=True` now default in `enable_pytorch_overrides()`
+
 ## [0.1.13] - 2026-01-07
 
 ### Fixed

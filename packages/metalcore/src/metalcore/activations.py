@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 """
 Metal-accelerated activation functions (GELU, SiLU).
 """
@@ -112,3 +115,42 @@ class MetalSiLU(nn.Module):
     
     def forward(self, x):
         return metal_silu(x)
+
+
+def bias_gelu(x, bias):
+    """
+    Fused bias + GELU: gelu(x + bias)
+    
+    More efficient than separate x + bias followed by gelu().
+    Falls back to PyTorch if Metal not available.
+    
+    Args:
+        x: Input tensor [*, hidden_size]
+        bias: Bias tensor [hidden_size]
+    
+    Returns:
+        gelu(x + bias)
+    """
+    if not _HAS_METAL or x.device.type != 'mps':
+        return F.gelu(x + bias)
+    return metalcore_backend.bias_gelu_fwd(x.contiguous(), bias.contiguous())
+
+
+def bias_silu(x, bias):
+    """
+    Fused bias + SiLU: silu(x + bias)
+    
+    More efficient than separate x + bias followed by silu().
+    Falls back to PyTorch if Metal not available.
+    
+    Args:
+        x: Input tensor [*, hidden_size]
+        bias: Bias tensor [hidden_size]
+    
+    Returns:
+        silu(x + bias)
+    """
+    if not _HAS_METAL or x.device.type != 'mps':
+        return F.silu(x + bias)
+    return metalcore_backend.bias_silu_fwd(x.contiguous(), bias.contiguous())
+

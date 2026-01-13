@@ -1,3 +1,6 @@
+# Author: Kris Bailey
+# Copyright 2026
+# Email: kris@krisbailey.com
 """
 QR Decomposition using Blocked Householder Algorithm.
 
@@ -15,6 +18,13 @@ two large matrix multiplications, which is where GPU shines.
 import torch
 from . import config
 
+# Try to import native Metal backend
+_HAS_METAL = False
+try:
+    import metalcore_backend
+    _HAS_METAL = True
+except ImportError:
+    pass
 
 # Threshold for switching between blocked and unblocked
 QR_BLOCKSIZE = 32
@@ -341,13 +351,52 @@ def _qr_unblocked(A, mode='reduced'):
 
 
 def _qr_batched(A, mode='reduced'):
-    """Batched QR decomposition."""
+    """
+    Batched QR decomposition using native Metal kernel.
+    
+    Uses GPU-parallel QR for small matrices (≤32x32).
+    For larger matrices, falls back to CPU due to Metal kernel race conditions.
+    """
     batch_shape = A.shape[:-2]
     M, N = A.shape[-2:]
+    K = min(M, N)
     
     A_flat = A.reshape(-1, M, N)
     batch_size = A_flat.shape[0]
     
+    # BUGFIX: Metal batched kernels have race conditions for M > 32
+    # Only use Metal for sizes 8, 16, 32 where specialized kernels work
+    use_metal = _HAS_METAL and A.device.type == 'mps' and M <= 32 and N <= 32
+    
+    # Use native Metal kernel for small matrices
+    if use_metal:
+        try:
+            Q, R = metalcore_backend.qr_batched(A_flat)
+            
+            # Reshape back to original batch shape
+            Q = Q.reshape(*batch_shape, M, K)
+            R = R.reshape(*batch_shape, K, N)
+            
+            if mode == 'r':
+                return R
+            elif mode == 'complete':
+                # Extend Q to full M x M orthogonal matrix
+                Q_full = torch.eye(M, device=A.device, dtype=A.dtype).unsqueeze(0).expand(A_flat.shape[0], -1, -1).clone()
+                Q_full[:, :, :K] = Q
+                # Orthogonalize remaining columns via Gram-Schmidt
+                for j in range(K, M):
+                    v = Q_full[:, :, j]
+                    for k in range(j):
+                        v = v - (Q_full[:, :, k] * v).sum(dim=1, keepdim=True) * Q_full[:, :, k]
+                    v = v / v.norm(dim=1, keepdim=True)
+                    Q_full[:, :, j] = v
+                return Q_full.reshape(*batch_shape, M, M), R
+            return Q, R
+        except Exception:
+            pass  # Fall back to loop-based approach
+    
+    # Fallback: loop-based (slow)
+    batch_size = A_flat.shape[0]
     Q_list = []
     R_list = []
     
